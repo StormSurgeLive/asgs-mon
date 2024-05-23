@@ -97,7 +97,7 @@ foreach my $envar (qw/SCRIPTDIR _ASGSH_CURRENT_PROFILE ASGS_CONFIG STATEFILE HPC
 }
 
 h2o $info, qw/plugindir/;
-$info->{plugindir} = sprintf qq{%s/../etc}, $Bin;
+$info->{plugindir} = sprintf qq{%s/../active}, $Bin;
 
 # get state
 my $state = h2o ASGSUtil::state_from_file( $info->statefile );
