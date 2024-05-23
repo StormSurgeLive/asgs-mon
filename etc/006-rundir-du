@@ -26,7 +26,7 @@
 
 THIS=$(basename -- $0)
 
-source $SCRIPTDIR/etc/asgs-mon-plugins/_bash-helper-functions.sh
+source $ASGS_MON_PLUGINDIR/_bash-helper-functions.sh
 
 # standard parameters
 OLDOUT=$1     # asgs-mon saves the first line of STDOUT for each check, on the next run it gets passed back

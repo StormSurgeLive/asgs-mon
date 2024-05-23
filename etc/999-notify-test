@@ -24,7 +24,7 @@
 
 THIS=$(basename -- $0)
 
-source $SCRIPTDIR/etc/asgs-mon-plugins/_bash-helper-functions.sh
+source $ASGS_MON_PLUGINDIR/_bash-helper-functions.sh
 
 # standard parameters
 ASGS_PID=$1   # asgs-mon is meant to work with a running asgs_main.sh, consider this required

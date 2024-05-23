@@ -26,6 +26,7 @@ use ASGSUtil qw//;
 package bin::asgs_mon;
 use strict;
 use warnings;
+use FindBin qw/$Bin/;
 
 use Term::ANSIColor qw/:constants colorstrip/;
 use JSON::PP        qw/encode_json decode_json/;
@@ -96,10 +97,13 @@ foreach my $envar (qw/SCRIPTDIR _ASGSH_CURRENT_PROFILE ASGS_CONFIG STATEFILE HPC
 }
 
 h2o $info, qw/plugindir/;
-$info->{plugindir} = sprintf qq{%s/etc/asgs-mon-plugins}, $info->scriptdir;
+$info->{plugindir} = sprintf qq{%s/../etc}, $Bin;
 
 # get state
 my $state = h2o ASGSUtil::state_from_file( $info->statefile );
+
+# add so scripts can easily read it to do includes and whatnot
+$ENV{ASGS_MON_PLUGINDIR} = $info->plugindir;
 
 opendir my $dh, $info->plugindir || die qq{Can't open $info->plugindir: $!};
 
