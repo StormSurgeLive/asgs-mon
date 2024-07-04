@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+#--------------------------------------------------------------------------
+# etc/asgs-mon-plugins/003-syslog-progress
+#--------------------------------------------------------------------------
+# Copyright(C) 2024 Brett Estrade
+# Copyright(C) 2024 Jason Fleming
+#
+# This file is part of the ADCIRC Surge Guidance System (ASGS).
+#
+# The ASGS is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# ASGS is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with the ASGS.  If not, see <http://www.gnu.org/licenses/>.
+#--------------------------------------------------------------------------
+
+THIS=$(basename -- $0)
+
+source $ASGS_MON_PLUGINDIR/_bash-helper-functions.sh
+
+# standard parameters
+OLDOUT=$1     # asgs-mon saves the first line of STDOUT for each check, on the next run it gets passed back
+OLDEXIT=$2    # the previous exit code is also saved and passed back 
+COUNT=$3      # iternation count of asgs-mon
+DELAY=$4      # number of seconds asgs-mon waits before checks 
+PROFILE=$5    # this is the ASGS profile name underwhich asgs-mon is running
+CONFIGFILE=$6 # config file associated with the $PROFILE 
+STATEFILE=$7  # path to the statefile associated with the $PROFILE
+VERBOSE=$8    # value of the "-v" flag passed t asgs-mon, so the plugin can use it if needed
+
+OK=0
+WARNING=1
+CRITICAL=2
+UNKNOWN=3
+NOTIFY=4
+
+# initialize at line 0 (so start at line 1)
+PREV_LASTLINE=${OLDOUT:-0}
+CURR_STARTLINE=$(($PREV_LASTLINE+1))
+CURR_LASTLINE=$(wc -l $SYSLOG | awk '{print $1}')
+TAIL_CHUNK=$(($CURR_LASTLINE-$PREV_LASTLINE))
+
+#if [[ $DIFF -ge 21600  ]]; then # 6 hours a good upper bound?
+# cat <<EOF
+#(${HPCENVSHORT} ${PROFILE} - ${YW}${THIS}${R}) ${YW}${B}WARNING${R} $TIMEOLD since SYSLOG updated
+#
+#$SYSLOG
+#
+#Suggested Remedy:
+#
+#Log into $HPCENV and make sure ASGS is still running ...
+#
+#Information:
+#
+#System : $HPCENV
+#ASGS   : $SCRIPTDIR
+#Profile: $PROFILE
+#
+#Details:
+#
+#EOF
+#  exit $WARNING;
+#fi
+
+COLORED_PROFILE=${CY}$PROFILE${R}
+
+if [[ $VERBOSE == 1 ]]; then
+  echo "($HPCENVSHORT $COLORED_PROFILE - ${GR}$THIS${R}) SYSLOG changed $TAIL_CHUNK lines" >&2 # echo to STDERR
+  if [[ "$TAIL_CHUNK" != 0 ]]; then
+    tail -n $TAIL_CHUNK $SYSLOG >&2
+  else
+    tail -n 1 $SYSLOG >&2
+  fi
+fi 
+echo $CURR_LASTLINE
+exit $OK
