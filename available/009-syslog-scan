@@ -72,11 +72,12 @@ TAIL_CHUNK=$(($CURR_LASTLINE-$PREV_LASTLINE))
 COLORED_PROFILE=${CY}$PROFILE${R}
 
 if [[ $VERBOSE == 1 ]]; then
-  echo "($HPCENVSHORT $COLORED_PROFILE - ${GR}$THIS${R}) SYSLOG changed $TAIL_CHUNK lines" >&2 # echo to STDERR
   if [[ "$TAIL_CHUNK" != 0 ]]; then
+    echo "($HPCENVSHORT $COLORED_PROFILE - ${GR}$THIS${R}) SYSLOG changed by $TAIL_CHUNK line(s):" >&2
     tail -n $TAIL_CHUNK $SYSLOG >&2
   else
-    tail -n 1 $SYSLOG >&2
+    echo "($HPCENVSHORT $COLORED_PROFILE - ${GR}$THIS${R}) SYSLOG no change, last line seen:" >&2
+    tail -n 1 $SYSLOG   >&2
   fi
 fi 
 echo $CURR_LASTLINE

@@ -61,15 +61,14 @@ Error finding asgs_main.sh PID. Exiting ...
 EOF
         exit $retcode;
     }
-    my @PIDS = split /\n/, $ASGS_PID;
+    my @PIDS = sort { $a <=> $b } split /\n/, $ASGS_PID;
     if ( @PIDS > 1 ) {
         say STDERR (<<EOF);
-Found too many PIDs. Make sure you don't have more than one instance of this configuration file,
-$ASGS_CONFIG, running. Exiting ...
+Found multiple PIDs. Make sure you don't have more than one instance of this configuration file,
+$ASGS_CONFIG, running. Using lowest numbered PID ...
 EOF
-        exit EXIT_ERROR;
     }
-    return $ASGS_PID;
+    return shift @PIDS;
 }
 
 my $o = Getopt2h2o \@ARGV, { delay => 30 }, qw/debug delay=i foreground hush=i pid=i trace v/;
@@ -168,10 +167,6 @@ EOF
         CACHE->{$plugin}->{output}  = shift @output // q{};
         CACHE->{$plugin}->{retcode} = $retcode; 
     }
-
-    # TODO - output some aggregate stats about exit codes, messages sent, etc
-    print qq{Status Summary: ... TODO \n};
-    print qq{\n};
 
     sleep $o->delay;
 }
