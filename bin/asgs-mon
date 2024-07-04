@@ -72,12 +72,14 @@ EOF
     return $ASGS_PID;
 }
 
-my $ASGS_CONFIG = $ENV{ASGS_CONFIG};
-my $ASGS_PID    = find_asgs_main_pid $ASGS_CONFIG;
+my $o = Getopt2h2o \@ARGV, { delay => 30 }, qw/debug delay=i foreground hush=i pid=i trace v/;
 
-chomp $ASGS_PID;
-
-my $o = Getopt2h2o \@ARGV, { delay => 30, pid => $ASGS_PID }, qw/debug delay=i foreground hush=i pid=i trace v/;
+if (! $o->pid) {
+  my $ASGS_CONFIG = $ENV{ASGS_CONFIG};
+  my $ASGS_PID    = find_asgs_main_pid $ASGS_CONFIG;
+  chomp $ASGS_PID;
+  $o->pid($ASGS_PID);
+}
 
 my $config = ini2h2o sprintf(qq{%s/asgs-global.conf}, ( getpwuid $> )[7]);
 
