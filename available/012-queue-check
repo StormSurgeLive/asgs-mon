@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------------
-# etc/asgs-mon-plugins/006-rundir-du
+# etc/asgs-mon-plugins/010-STATEFILE
 #--------------------------------------------------------------------------
 # Copyright(C) 2024 Brett Estrade
 # Copyright(C) 2024 Jason Fleming
@@ -54,17 +54,12 @@ if [[ $COUNT != 1 && $(($COUNT % 5)) != 0 ]]; then
   exit $OK
 fi
 
-RAWDU=$(du $RUNDIR | tail -n 1 | awk '{print $1}')
-DU=$(du -h $RUNDIR | tail -n 1 | awk '{print $1}')
+SQ=$(sq)
 
-DUDELTA="--"
-if [[ -n "$OLDOUT" ]]; then
-  DUDELTA=$(($RAWDU-$OLDOUT))
-fi
-
-if [[ $VERBOSE == 1 ]]; then
-  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) ${YW}RUNDIR is using ${B}$DU${R}, delta of $DUDELTA bytes" >&2
+# doesn't show on platforms where `sq` doesn't know the "squeue" type command 
+if [[ $VERBOSE == 1 && $(echo "$SQ" | grep -c guessing) == 0 ]]; then
+  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) $SQ" >&2
 fi 
 
-echo -n $RAWDU
+echo -n $STATEFILEOK
 exit $OK
