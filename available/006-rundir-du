@@ -46,10 +46,10 @@ NOTIFY=4
 
 PROFILE=${CY}$PROFILE${R}
 
-# example of a plugin controlled delay
+# example of a plugin controlled delay, i.e.,
+# runs every 5 times
 if [[ $COUNT != 1 && $(($COUNT % 5)) != 0 ]]; then
   PERIOD=$(($DELAY * 5))
-  echo "($HPCENVSHORT ${CY}$PROFILE${R} - ${MG}$THIS${R}) RUNDIR check ${B}${MG}skipped${R} (run every $PERIOD seconds)" >&2
   echo -n $OLDOUT # to preserve in asgs-mon's cache for next time it's actually run
   exit $OK
 fi
@@ -63,7 +63,7 @@ if [[ -n "$OLDOUT" ]]; then
 fi
 
 if [[ $VERBOSE == 1 ]]; then
-  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) RUNDIR is taking up $DU, delta of $DUDELTA bytes since last check" >&2
+  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) ${YW}RUNDIR is using ${B}$DU${R}, delta of $DUDELTA bytes since last check" >&2
 fi 
 
 echo -n $RAWDU

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------------
-# etc/asgs-mon-plugins/007-failed-dir
+# etc/asgs-mon-plugins/010-STATEFILE
 #--------------------------------------------------------------------------
 # Copyright(C) 2024 Brett Estrade
 # Copyright(C) 2024 Jason Fleming
@@ -46,54 +46,26 @@ NOTIFY=4
 
 PROFILE=${CY}$PROFILE${R}
 
-# example of a plugin controlled delay
-#if [[ $COUNT != 1 && $(($COUNT % 5)) != 0 ]]; then
-#  PERIOD=$(($DELAY * 5))
-#  echo "($HPCENVSHORT $PROFILE - $THIS) failed directory check skipped (run every $PERIOD seconds)" >&2
-#  echo -n $OLDOUT # to preserve in asgs-mon's cache for next time it's actually run
-#  exit $OK
-#fi
-
-FAILEDCOUNT=$(ls -rtd $RUNDIR/failed* 2> /dev/null | wc -l)
-
-if [[ "$FAILEDCOUNT" -ge 1 ]]; then
-  OLDIFS=$IFS
-  IFS=$'\n'
-  ALLFAILED=$(ls -1rtd $RUNDIR/failed*)
-  NEWESTFAILED=$(ls -1rtd $RUNDIR/failed* | tail -n 1)
-  LOGDUMP=$(tail $NEWESTFAILED/scenario.log)
-  IFS=$OLDIFS
-
- cat <<EOF
-(${HPCENVSHORT} ${PROFILE} - ${YW}${THIS}${R}) ${YW}${B}WARNING${R} $FAILEDCOUNT failed directories detected!
-
-Suggested Remedy:
-Log into $HPCENV and see what's going on in $SCRIPTDIR.
-
-Information:
-Could not find asgs_main.sh running with the pid of $ASGS_PID.
-
-System : $HPCENV
-ASGS   : $SCRIPTDIR
-Profile: $PROFILE
-
-Failed directories found:
-
-$ALLFAILED
-
-Latest tail of $NEWESTFAILED/scenario.log:
-
-$LOGDUMP
-
-EOF
-
-  exit $WARNING;
+# example of a plugin controlled delay, i.e.,
+# runs every 5 times
+if [[ $COUNT != 1 && $(($COUNT % 5)) != 0 ]]; then
+  PERIOD=$(($DELAY * 5))
+  echo -n $OLDOUT # to preserve in asgs-mon's cache for next time it's actually run
+  exit $OK
 fi
 
-#if [[ $VERBOSE == 1 ]]; then
-#  # it's a distraction to say "all OK" except in a small % of situations
-#  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) 0 failed directories found (pid $ASGS_PID)" >&2 # echo to STDERR
-#fi 
+STATEFILEOK=0
+if [ -e "$STATEFILE" ]; then
+  source $STATEFILE
+  STATEFILEOK=1
+fi
 
-echo -n $FAILEDCOUNT 
+if [[ $VERBOSE == 1 ]]; then
+  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) Current Run STATES:" >&2
+  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}ADVISORY${R}  : $ADVISORY"   >&2
+  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}RUNDIR${R}    : $RUNDIR"     >&2
+  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}LASTSUBDIR${R}: $LASTSUBDIR" >&2
+fi 
+
+echo -n $STATEFILEOK
 exit $OK
