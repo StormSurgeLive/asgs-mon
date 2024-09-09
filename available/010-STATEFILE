@@ -64,7 +64,6 @@ if [[ $VERBOSE == 1 ]]; then
   echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) Current Run STATES:" >&2
   echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}ADVISORY${R}  : $ADVISORY"   >&2
   echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}RUNDIR${R}    : $RUNDIR"     >&2
-  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}LASTSUBDIR${R}: $LASTSUBDIR" >&2
 fi 
 
 echo -n $STATEFILEOK
