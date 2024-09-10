@@ -58,7 +58,7 @@ SQ=$(sq)
 
 # doesn't show on platforms where `sq` doesn't know the "squeue" type command 
 if [[ $VERBOSE == 1 && $(echo "$SQ" | grep -c guessing) == 0 ]]; then
-  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) $SQ" >&2
+  printf "($HPCENVSHORT $PROFILE - ${GR}$THIS${R})\n$SQ\n" >&2
 fi 
 
 echo -n $STATEFILEOK
