@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------------
-# etc/asgs-mon-plugins/003-syslog-progress
+# 009-syslog-scan
 #--------------------------------------------------------------------------
 # Copyright(C) 2024 Brett Estrade
 # Copyright(C) 2024 Jason Fleming
@@ -46,28 +46,6 @@ PREV_LASTLINE=${OLDOUT:-0}
 CURR_STARTLINE=$(($PREV_LASTLINE+1))
 CURR_LASTLINE=$(wc -l $SYSLOG | awk '{print $1}')
 TAIL_CHUNK=$(($CURR_LASTLINE-$PREV_LASTLINE))
-
-#if [[ $DIFF -ge 21600  ]]; then # 6 hours a good upper bound?
-# cat <<EOF
-#(${HPCENVSHORT} ${PROFILE} - ${YW}${THIS}${R}) ${YW}${B}WARNING${R} $TIMEOLD since SYSLOG updated
-#
-#$SYSLOG
-#
-#Suggested Remedy:
-#
-#Log into $HPCENV and make sure ASGS is still running ...
-#
-#Information:
-#
-#System : $HPCENV
-#ASGS   : $SCRIPTDIR
-#Profile: $PROFILE
-#
-#Details:
-#
-#EOF
-#  exit $WARNING;
-#fi
 
 COLORED_PROFILE=${CY}$PROFILE${R}
 

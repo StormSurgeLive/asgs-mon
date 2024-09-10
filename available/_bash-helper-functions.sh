@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------------
-# etc/asgs-mon-plugins/000-asgs_main-pid-check
+# active/_bash-helper-functions.sh
 #--------------------------------------------------------------------------
 # Copyright(C) 2024 Brett Estrade
 # Copyright(C) 2024 Jason Fleming

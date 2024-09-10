@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------------
-# etc/asgs-mon-plugins/005-hook-status-progress
+# 005-hook-status-progress
 #--------------------------------------------------------------------------
 # Copyright(C) 2024 Brett Estrade
 # Copyright(C) 2024 Jason Fleming

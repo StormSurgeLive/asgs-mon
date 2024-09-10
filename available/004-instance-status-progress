@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------------
-# etc/asgs-mon-plugins/004-instance-status-progress
+# 004-instance-status-progress
 #--------------------------------------------------------------------------
 # Copyright(C) 2024 Brett Estrade
 # Copyright(C) 2024 Jason Fleming

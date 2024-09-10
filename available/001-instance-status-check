@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 #--------------------------------------------------------------------------
-# etc/asgs-mon-plugins/001-instance-status-check
+# 001-instance-status-check
 #--------------------------------------------------------------------------
 # Copyright(C) 2024 Brett Estrade
 # Copyright(C) 2024 Jason Fleming

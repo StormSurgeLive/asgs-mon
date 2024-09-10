@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------------
-# etc/asgs-mon-plugins/000-asgs_main-pid-check
+# asgs-mon-plugins/000-asgs_main-pid-check
 #--------------------------------------------------------------------------
 # Copyright(C) 2024 Brett Estrade
 # Copyright(C) 2024 Jason Fleming
