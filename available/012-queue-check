@@ -54,10 +54,10 @@ if [[ $COUNT != 1 && $(($COUNT % 5)) != 0 ]]; then
   exit $OK
 fi
 
-SQ=$(sq)
+SQ=$(sq 2>&1)
 
 # doesn't show on platforms where `sq` doesn't know the "squeue" type command 
-if [[ $VERBOSE == 1 && $(echo "$SQ" | grep -c guessing) == 0 ]]; then
+if [[ $VERBOSE == 1 && $(echo "$SQ" | grep -ic Guessing) == 0 ]]; then
   printf "($HPCENVSHORT $PROFILE - ${GR}$THIS${R})\n$SQ\n" >&2
 fi 
 
