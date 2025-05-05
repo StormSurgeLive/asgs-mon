@@ -21,11 +21,11 @@
 # along with the ASGS.  If not, see <http://www.gnu.org/licenses/>.
 #--------------------------------------------------------------------------
 
-use ASGSUtil qw//;
-
 package bin::asgs_mon;
+use v5.10;
 use strict;
-use warnings;
+
+use ASGSUtil qw//;
 use FindBin qw/$Bin/;
 
 use Term::ANSIColor qw/:constants colorstrip/;
@@ -52,7 +52,8 @@ local %ENV = %ENV;
 
 sub find_asgs_main_pid($) {
     my $ASGS_CONFIG = shift;
-    my $ASGS_PID = `ps aux | grep [a]sgs_main.sh | grep '$ASGS_CONFIG' | awk '{ print \$2 }'`;
+    my $_CMD = "ps aux | grep [a]sgs_main.sh | grep \"\$(basename \$ASGS_CONFIG)\" | awk '{ print \$2 }'";
+    my $ASGS_PID = `$_CMD`;
     my $retcode  = $? >> 8;
 
     if ( $retcode != EXIT_SUCCESS ) {
@@ -61,14 +62,17 @@ Error finding asgs_main.sh PID. Exiting ...
 EOF
         exit $retcode;
     }
+
     my @PIDS = sort { $a <=> $b } split /\n/, $ASGS_PID;
+
     if ( @PIDS > 1 ) {
         say STDERR (<<EOF);
 Found multiple PIDs. Make sure you don't have more than one instance of this configuration file,
 $ASGS_CONFIG, running. Using lowest numbered PID ...
 EOF
     }
-    return shift @PIDS;
+
+    return  @PIDS; # send all pids
 }
 
 my $o = Getopt2h2o \@ARGV, { delay => 30, v => 1 }, qw/debug delay=i foreground help hush=i pid=i trace silent|s v/;
@@ -106,8 +110,9 @@ EOHELP
 
 if (! $o->pid) {
   my $ASGS_CONFIG = $ENV{ASGS_CONFIG};
-  my $ASGS_PID    = find_asgs_main_pid $ASGS_CONFIG;
-  die "FATAL! Can't find pid for asgs_main.sh. Is it running? Try using '--pid PID' ...\n\n";
+  my ($ASGS_PID)  = find_asgs_main_pid $ASGS_CONFIG; # capture first in any list
+  die "FATAL! Can't find pid for asgs_main.sh. Is it running? Try using '--pid PID' ...\n\n"
+    if not $ASGS_PID;
   chomp $ASGS_PID;
   $o->pid($ASGS_PID);
 }
