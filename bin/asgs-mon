@@ -107,6 +107,7 @@ EOHELP
 if (! $o->pid) {
   my $ASGS_CONFIG = $ENV{ASGS_CONFIG};
   my $ASGS_PID    = find_asgs_main_pid $ASGS_CONFIG;
+  die "FATAL! Can't find pid for asgs_main.sh. Is it running? Try using '--pid PID' ...\n\n";
   chomp $ASGS_PID;
   $o->pid($ASGS_PID);
 }
@@ -114,7 +115,40 @@ if (! $o->pid) {
 # silence verbose mode (verbose is "on" by default)
 $o->v(undef) if ($o->silent);
 
-my $config = ini2h2o sprintf(qq{%s/asgs-global.conf}, ( getpwuid $> )[7]);
+my $CONFIG = sprintf(qq{%s/asgs-global.conf}, ( getpwuid $> )[7]);
+
+sub fatal_config_error {
+    my $msg = shift // "";
+    die <<EOF
+FATAL: $msg
+
+asgs-mon requires a properly configured '$CONFIG' be present so that notification emails will be sent. Example configuration,
+
+  [email]
+  ;; used by ASGS to send emails
+  from_address=info\@notify.stormsurge.live
+  reply_to_address=info\@notify.stormsurge.live
+  smtp_host=email-smtp.us-east-1.amazonaws.com
+  smtp_password=somepassword
+  smtp_port=587
+  smtp_username=someusername
+  
+  [monitor]
+  ;; used by asgs-mon to know to whom to send emails
+  notify_email=get-notifications\@myemailhost.tld
+
+EOF
+}
+
+if (!-e $CONFIG) {
+ fatal_config_error("Can't find '$CONFIG'!");
+}
+
+my $config = ini2h2o $CONFIG;
+
+if (!$config->monitor->notify_email) {
+ fatal_config_error("Notification email not set in, '$CONFIG'!");
+}
 
 # store in %ENV, that is available to all plugins
 $ENV{ASGS_PID} = $o->pid;
