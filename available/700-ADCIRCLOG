@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+#--------------------------------------------------------------------------
+# etc/asgs-mon-plugins/010-STATEFILE
+#--------------------------------------------------------------------------
+# Copyright(C) 2024 Brett Estrade
+# Copyright(C) 2024 Jason Fleming
+#
+# This file is part of the ADCIRC Surge Guidance System (ASGS).
+#
+# The ASGS is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# ASGS is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with the ASGS.  If not, see <http://www.gnu.org/licenses/>.
+#--------------------------------------------------------------------------
+
+# this check just reports the total amount and change from last
+# check for $RUNDIR
+
+THIS=$(basename -- $0)
+
+source $ASGS_MON_PLUGINDIR/_bash-helper-functions.sh
+
+# standard parameters
+OLDOUT=$1     # asgs-mon saves the first line of STDOUT for each check, on the next run it gets passed back
+OLDEXIT=$2    # the previous exit code is also saved and passed back 
+COUNT=$3      # iternation count of asgs-mon
+DELAY=$4      # number of seconds asgs-mon waits before checks 
+PROFILE=$5    # this is the ASGS profile name underwhich asgs-mon is running
+CONFIGFILE=$6 # config file associated with the $PROFILE 
+STATEFILE=$7  # path to the statefile associated with the $PROFILE
+VERBOSE=$8    # value of the "-v" flag passed t asgs-mon, so the plugin can use it if needed
+
+OK=0
+WARNING=1
+CRITICAL=2
+UNKNOWN=3
+NOTIFY=4
+
+PROFILE=${CY}$PROFILE${R}
+
+STATEFILEOK=0
+if [ -e "$STATEFILE" ]; then
+  source $STATEFILE
+  STATEFILEOK=1
+fi
+
+if [[ $VERBOSE == 1 ]]; then
+  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}RUNDIR${R}    : $RUNDIR"     >&2
+fi 
+
+for ADCIRCLOG in $(find "$RUNDIR/$ADVISORY" -name adcirc.log); do
+  echo $ADCIRCLOG >&2
+  tail -n 2 $ADCIRCLOG >&2
+done
+
+echo -n $STATEFILEOK
+exit $OK
