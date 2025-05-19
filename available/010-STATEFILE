@@ -60,10 +60,16 @@ if [ -e "$STATEFILE" ]; then
   STATEFILEOK=1
 fi
 
+_ADVISORY=$ADVISORY
+if [[ -z "$ADVISORY" || "$ADVISORY" == 0 ]]; then
+  ADVISORY=initialize
+  _ADVISORY="initializing ..."
+fi
+
 if [[ $VERBOSE == 1 ]]; then
   echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) Current Run STATES:" >&2
-  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}ADVISORY${R}  : $ADVISORY"   >&2
   echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}RUNDIR${R}    : $RUNDIR"     >&2
+  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}ADVISORY${R}  : $ADVISORY"   >&2
 fi 
 
 echo -n $STATEFILEOK
