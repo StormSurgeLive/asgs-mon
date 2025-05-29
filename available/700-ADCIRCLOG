@@ -60,8 +60,21 @@ fi
 for ADCIRCLOG in $(find "$RUNDIR/$ADVISORY" -name adcirc.log); do
   echo $ADCIRCLOG >&2
   echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}ADCIRC LOG${R}:" >&2
-  echo " tail -n 2 ${YW}$ADCIRCLOG${R}" >&2
-  tail -n 2 $ADCIRCLOG | awk '{print "\033[0;32m" $0 "\033[0m"}' >&2
+  tail -n 3 $ADCIRCLOG | awk '{print "\033[0;32m" $0 "\033[0m"}' >&2
+done
+
+
+# | grep -c PE
+for SWANLOG in $(find "$RUNDIR/$ADVISORY" -name asgs_swan.prt | grep PE0000); do
+  echo $SWANLOG >&2
+  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}SWAN LOG${R}:" >&2
+  tail -n 10 $SWANLOG | grep "Time of" | awk '{print "\033[0;32m" $0 "\033[0m"}'  >&2 
+done
+
+for SWANLOG in $(find "$RUNDIR/$ADVISORY" -name asgs_swan.prt | grep -v PE); do
+  echo $SWANLOG >&2
+  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}SWAN LOG${R}:" >&2
+  tail -n 10 $SWANLOG | grep "Time of" | awk '{print "\033[0;32m" $0 "\033[0m"}' >&2 
 done
 
 echo -n $STATEFILEOK
