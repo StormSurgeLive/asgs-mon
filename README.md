@@ -152,3 +152,26 @@ Bash: `available/_bash-helper-functions.sh`
 Perl: `PERL/ASGSUtils.pm`
 
 `use ASGSUtils;`
+
+## Available Plugins
+
+| File Name                | Description | Enabled by Default |
+|---------------------------|-------------|--------------------|
+| 000-asgs_main-pid-check  |             | ✅                 |
+| 001-instance-status-check |             |                    |
+| 002-hook-status-check    |             |                    |
+| 003-syslog-progress      |             |                    |
+| 004-instance-status-progress |         |                    |
+| 005-hook-status-progress |             |                    |
+| 006-rundir-du            |             | ✅                 |
+| 007-failed-dir           |             | ✅                 |
+| 008-heart-beat           |             |                    |
+| 009-syslog-scan          |             | ✅                 |
+| 010-STATEFILE            |             | ✅                 |
+| 012-queue-check          |             | ✅                 |
+| 700-ADCIRCLOG            |             | ✅                 |
+| 999-critical-test        |             |                    |
+| 999-notify-test          |             |                    |
+| 999-warning-test         |             |                    |
+| README                   |             |                    |
+| _bash-helper-functions.sh|             | ✅                 |
