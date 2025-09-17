@@ -167,7 +167,7 @@ the activation pattern is replicated here.
 | 003-syslog-progress        |                                                           |                    |
 | 004-instance-status-progress |                                                         |                    |
 | 005-hook-status-progress   |                                                           |                    |
-| 006-rundir-du              | checks delta of `RUNDIR`                                  | ✅                 |
+| 006-rundir-du              | checks delta disk size of `RUNDIR`                        | ✅                 |
 | 007-failed-dir             | detects failed directories and notifies the operator      | ✅                 |
 | 008-heart-beat             |                                                           |                    |
 | 009-syslog-scan            | shows the latest lines of `SYSLOG` since last time        | ✅                 |
