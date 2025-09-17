@@ -32,7 +32,9 @@ The monitor is verbose by default. To silence and show only warnings, use the
 ## Introduction
 
 `bin/asgs-mon` is a supervisory or watchdog program that is meant to be run
-by operators who wish to keep a vigilant eye on their ASGS instance.
+by Operators who wish to keep a vigilant eye on their ASGS instance.
+
+## Using Existing Plugins
 
 The main executable `bin/asgs-mon` does not do any checks. Instead it runs
 any executable file that resides in the `active` subdirectory. So each "check"
@@ -42,8 +44,6 @@ must be a script or executable program that's been placed in that directory.
 subdirectory, passing each one a fixed and identical set of parameters.
 It also expects a certain range of meaningful exit codes. If you are familiar
 with the **Nagios** monitoring tool, `asgs-mon` is modeled to work the same way.
-
-## Existing Monitoring Plugins
 
 Making a plugin "active" is done by creating an soft linke (`ln -s`) to the script you want to run. It doesn't
 have to be in `./available`, but it probably will be. This is a similar model to how some web servers do it, so
@@ -175,6 +175,3 @@ Bash: `available/_bash-helper-functions.sh`
 Perl: `PERL/ASGSUtils.pm`
 
 `use ASGSUtils;`
-
-
-
