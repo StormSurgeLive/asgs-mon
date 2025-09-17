@@ -155,23 +155,21 @@ Perl: `PERL/ASGSUtils.pm`
 
 ## Available Plugins
 
-| File Name                | Description | Enabled by Default |
-|---------------------------|-------------|--------------------|
-| 000-asgs_main-pid-check  |             | ✅                 |
-| 001-instance-status-check |             |                    |
-| 002-hook-status-check    |             |                    |
-| 003-syslog-progress      |             |                    |
-| 004-instance-status-progress |         |                    |
-| 005-hook-status-progress |             |                    |
-| 006-rundir-du            |             | ✅                 |
-| 007-failed-dir           |             | ✅                 |
-| 008-heart-beat           |             |                    |
-| 009-syslog-scan          |             | ✅                 |
-| 010-STATEFILE            |             | ✅                 |
-| 012-queue-check          |             | ✅                 |
-| 700-ADCIRCLOG            |             | ✅                 |
-| 999-critical-test        |             |                    |
-| 999-notify-test          |             |                    |
-| 999-warning-test         |             |                    |
-| README                   |             |                    |
-| _bash-helper-functions.sh|             | ✅                 |
+| File Name                  | Description                                               | Enabled by Default |
+|----------------------------|-----------------------------------------------------------|--------------------|
+| 000-asgs_main-pid-check    | ensures asgs_main.sh is running with existing PID         | ✅                 |
+| 001-instance-status-check  |                                                           |                    |
+| 002-hook-status-check      |                                                           |                    |
+| 003-syslog-progress        |                                                           |                    |
+| 004-instance-status-progress |                                                         |                    |
+| 005-hook-status-progress   |                                                           |                    |
+| 006-rundir-du              | checks delta of `RUNDIR`                                  | ✅                 |
+| 007-failed-dir             | detects failed directories and notifies the operator      | ✅                 |
+| 008-heart-beat             |                                                           |                    |
+| 009-syslog-scan            | shows the latest lines of `SYSLOG` since last time        | ✅                 |
+| 010-STATEFILE              | sanity check to ensure the `STATEFILE` has valid info     | ✅                 |
+| 012-queue-check            | displays `USER`'s batch queue or running processes        | ✅                 |
+| 700-ADCIRCLOG              | shows the last lines of ADCIRC since the last time        | ✅                 |
+| 999-critical-test          |                                                           |                    |
+| 999-notify-test            |                                                           |                    |
+| 999-warning-test           |                                                           |                    |
