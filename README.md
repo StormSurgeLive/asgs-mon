@@ -22,7 +22,7 @@ The monitor is verbose by default. To silence and show only warnings, use the
 | Option | Meaning |
 | ------ | ------- |
 | `--debug` |        |
-| `--delay SECONDS`  | Specify delay to start checks, default is 30 seconds |
+| `--delay SECONDS`  | Specify time increment between checks, default is 30 seconds |
 | `--foreground`     | Runs each check in the foreground |
 | `--help`           | Print this menu |
 | `--pid PID`      | Specifies running ASGS process ID (not required) |
