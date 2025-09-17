@@ -49,6 +49,10 @@ Making a plugin "active" is done by creating an soft linke (`ln -s`) to the scri
 have to be in `./available`, but it probably will be. This is a similar model to how some web servers do it, so
 the activation pattern is replicated here.
 
+Many of the existing plugins in the table below are the artifacts of development and testing
+and were created to explore possibilities within monitoring. The ones enabled by default
+were found to actually be useful in production. 
+
 | File Name                  | Description                                               | Enabled by Default |
 |----------------------------|-----------------------------------------------------------|--------------------|
 | 000-asgs_main-pid-check    | ensures asgs_main.sh is running with existing PID         | ✅                 |
@@ -57,16 +61,16 @@ the activation pattern is replicated here.
 | 003-syslog-progress        | reports time since `SYSLOG` was last updated; sends a WARNING message if it has been longer than 6 hours | |
 | 004-instance-status-progress | same as above but for the `asgs.instance.status.json` file |                 |
 | 005-hook-status-progress   | same as above but for the `hook.status.json` file         |                    |
-| 006-rundir-du              | reports storage used in the current `RUNDIR` as well as change from last execution (runs every 5th executions of `asgs-mon` | ✅ |
+| 006-rundir-du              | reports storage used in the current `RUNDIR` as well as change from last execution (runs every 5th execution of `asgs-mon`) | ✅ |
 | 007-failed-dir             | detects `failed.*` directories in `RUNDIR` and notifies the Operator if one exists  | ✅ |
 | 008-heart-beat             | sends an error if `asgs-mon` has not run in the past 3 hours |                 |
-| 009-syslog-scan            | shows the latest lines of `SYSLOG` since last time        | ✅                 |
-| 010-STATEFILE              | sanity check to ensure the `STATEFILE` has valid info     | ✅                 |
-| 012-queue-check            | displays `USER`'s batch queue or running processes        | ✅                 |
-| 700-ADCIRCLOG              | shows the last lines of ADCIRC since the last time        | ✅                 |
-| 999-critical-test          |                                                           |                    |
-| 999-notify-test            |                                                           |                    |
-| 999-warning-test           |                                                           |                    |
+| 009-syslog-scan            | shows lines of `SYSLOG` added since last check            | ✅                 |
+| 010-STATEFILE              | sanity check to ensure the `STATEFILE` has valid info (runs every 5th execution of `asgs-mon`) | ✅  |
+| 012-queue-check            | displays `USER`'s queued or running jobs (runs every 5th execution of `asgs-mon`) | ✅ |
+| 700-ADCIRCLOG              | reports the last 3 lines of all `adcirc.log` files and `asgs_swan.prt` files found in the `ADVISORY` directory specified in the `STATEFILE` | ✅ |
+| 999-critical-test          | sends error email if `$ASGS_TMPDIR/.critical` file exists | |
+| 999-notify-test            | same as above but for file named `.notify`                | |
+| 999-warning-test           | same as above but for file named `.warning`               | |
 
 ## Creating New Plugins
 
