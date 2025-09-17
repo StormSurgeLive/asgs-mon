@@ -43,7 +43,41 @@ subdirectory, passing each one a fixed and identical set of parameters.
 It also expects a certain range of meaningful exit codes. If you are familiar
 with the **Nagios** monitoring tool, `asgs-mon` is modeled to work the same way.
 
-## Plugin Input
+## Existing Monitoring Plugins
+
+Making a plugin "active" is done by creating an soft linke (`ln -s`) to the script you want to run. It doesn't
+have to be in `./available`, but it probably will be. This is a similar model to how some web servers do it, so
+the activation pattern is replicated here.
+
+| File Name                  | Description                                               | Enabled by Default |
+|----------------------------|-----------------------------------------------------------|--------------------|
+| 000-asgs_main-pid-check    | ensures asgs_main.sh is running with existing PID         | ✅                 |
+| 001-instance-status-check  | confirm that valid `asgs.instance.status.json` exists; reports `time.status.lastupdated` but does not act on it | |
+| 002-hook-status-check      | same as above but for the `hook.status.json` file         |                    |
+| 003-syslog-progress        | reports time since `SYSLOG` was last updated; sends a WARNING message if it has been longer than 6 hours | |
+| 004-instance-status-progress | same as above but for the `asgs.instance.status.json` file |                 |
+| 005-hook-status-progress   | same as above but for the `hook.status.json` file         |                    |
+| 006-rundir-du              | reports storage used in the current `RUNDIR` as well as change from last execution (runs every 5th executions of `asgs-mon` | ✅ |
+| 007-failed-dir             | detects `failed.*` directories in `RUNDIR` and notifies the Operator if one exists  | ✅ |
+| 008-heart-beat             | sends an error if `asgs-mon` has not run in the past 3 hours |                 |
+| 009-syslog-scan            | shows the latest lines of `SYSLOG` since last time        | ✅                 |
+| 010-STATEFILE              | sanity check to ensure the `STATEFILE` has valid info     | ✅                 |
+| 012-queue-check            | displays `USER`'s batch queue or running processes        | ✅                 |
+| 700-ADCIRCLOG              | shows the last lines of ADCIRC since the last time        | ✅                 |
+| 999-critical-test          |                                                           |                    |
+| 999-notify-test            |                                                           |                    |
+| 999-warning-test           |                                                           |                    |
+
+## Creating New Plugins
+
+Please look at what is in the `available` subdirectory. There are examples that use
+Perl and Bash. Early experience is suggesting that plugins should favor being
+created in Bash, and that Perl should only be considered if you only need the
+power of it for things like processing JSON, communicating to webservers, etc.
+
+In the case of plugins, simpler is better. They should be designed to do
+one very specific check. And a good rule of thumb is that they should not
+be more than 75 or 100 lines in length.
 
 ### Environmental Variables
 
@@ -83,7 +117,7 @@ paths is better done by `asgs-mon` than the plugin.
 an interval based on the check iteration count and/or the amount of time between
 checks.
 
-## Plugin Exit Codes and STDOUT
+### Plugin Exit Codes and STDOUT
 
 | Exit Code | Meaning |
 | --------- | ------- | 
@@ -118,7 +152,7 @@ The notification email sent if the exit code or status code is not `OK` uses the
 2. the second line is discarded (standard email, same as a git commit also)
 3. everything else is sent as the BODY of the email
 
-## Plugins and STDERR
+### Plugins and STDERR
 
 `STDERR` is reserved for use by each plugin to print status messages to the
 terminal. `asgs-mon` can be run in the background, but really it's meant to
@@ -132,18 +166,7 @@ so. There are no shortage of cases where the plugin will output to `STDERR`
 unconditionally, but this should be done sparingly to maintain a high
 signal/noise ratio for any Op who is monitoring things on a terminal.
 
-## Creating New Plugins
-
-Please look at what is in the `available` subdirectory. There are examples that use
-Perl and Bash. Early experience is suggesting that plugins should favor being
-created in Bash, and that Perl should only be considered if you only need the
-power of it for things like processing JSON, communicating to webservers, etc.
-
-In the case of plugins, simpler is better. They should be designed to do
-one very specific check. And a good rule of thumb is that they should not
-be more than 75 or 100 lines in length.
-
-## APPENDIX A. Helper Libraries for Common Needs
+### Helper Libraries for Common Needs
 
 Bash: `available/_bash-helper-functions.sh` 
 
@@ -153,27 +176,5 @@ Perl: `PERL/ASGSUtils.pm`
 
 `use ASGSUtils;`
 
-## Available Plugins
 
-Making a plugin "active" is done by creating an soft linke (`ln -s`) to the script you want to run. It doesn't
-have to be in `./available`, but it probably will be. This is a similar model to how some web servers do it, so
-the activation pattern is replicated here.
 
-| File Name                  | Description                                               | Enabled by Default |
-|----------------------------|-----------------------------------------------------------|--------------------|
-| 000-asgs_main-pid-check    | ensures asgs_main.sh is running with existing PID         | ✅                 |
-| 001-instance-status-check  |                                                           |                    |
-| 002-hook-status-check      |                                                           |                    |
-| 003-syslog-progress        |                                                           |                    |
-| 004-instance-status-progress |                                                         |                    |
-| 005-hook-status-progress   |                                                           |                    |
-| 006-rundir-du              | checks delta disk size of `RUNDIR`                        | ✅                 |
-| 007-failed-dir             | detects failed directories and notifies the operator      | ✅                 |
-| 008-heart-beat             |                                                           |                    |
-| 009-syslog-scan            | shows the latest lines of `SYSLOG` since last time        | ✅                 |
-| 010-STATEFILE              | sanity check to ensure the `STATEFILE` has valid info     | ✅                 |
-| 012-queue-check            | displays `USER`'s batch queue or running processes        | ✅                 |
-| 700-ADCIRCLOG              | shows the last lines of ADCIRC since the last time        | ✅                 |
-| 999-critical-test          |                                                           |                    |
-| 999-notify-test            |                                                           |                    |
-| 999-warning-test           |                                                           |                    |
