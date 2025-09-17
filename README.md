@@ -155,6 +155,10 @@ Perl: `PERL/ASGSUtils.pm`
 
 ## Available Plugins
 
+Making a plugin "active" is done by creating an soft linke (`ln -s`) to the script you want to run. It doesn't
+have to be in `./available`, but it probably will be. This is a similar model to how some web servers do it, so
+the activation pattern is replicated here.
+
 | File Name                  | Description                                               | Enabled by Default |
 |----------------------------|-----------------------------------------------------------|--------------------|
 | 000-asgs_main-pid-check    | ensures asgs_main.sh is running with existing PID         | ✅                 |
