@@ -6,11 +6,18 @@ Vigilant watchdog of ASGS.
 
 If you have not already done so, you will need to clone/install `asgs-mon` in your
 existing ASGS installation using `fetch asgs-mon` at the `asgsh` prompt. It will be installed
-in `$SCRIPTDIR/git/asgs-mon`. Once
-that is done, the command syntax to start it is as follows:
-
-`asgs-mon --pid <ASGS_PID> [--delay N] [-v]`
-
+in `$SCRIPTDIR/git/asgs-mon` which contains the links to plugins that will actually be used in the `active` 
+subdirectory. The `~/asgs-global.conf` must also be configured with the email address that should
+receive notifications of significant error conditions as follows:
+```
+[monitor]
+;; used by asgs-mon to know to whom to send emails
+notify_email=get-notifications\@myemailhost.tld
+```
+Once those steps are complete, the command syntax to start it is as follows:
+```
+asgs-mon --pid <ASGS_PID> [--delay N] [-v]
+```
 This monitor is meant to be run inside of an ASGS Shell Environment (i.e., `asgsh`) and
 expects there is a running `asgs_main.sh` to monitor. It expects that there
 is also an `ASGS_CONFIG` defined and present.
