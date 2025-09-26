@@ -4,6 +4,10 @@ Vigilant watchdog of ASGS.
 
 ## Usage
 
+If you have not already done so, you will need to clone/install `asgs-mon` in your
+existing ASGS installation using `fetch asgs-mon` at the `asgsh` prompt. Once
+that is done, the command syntax to start it is as follows:
+
 `asgs-mon --pid <ASGS_PID> [--delay N] [-v]`
 
 This monitor is meant to be run inside of an ASGS Shell Environment (i.e., `asgsh`) and
