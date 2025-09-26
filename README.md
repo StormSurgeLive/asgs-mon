@@ -5,7 +5,8 @@ Vigilant watchdog of ASGS.
 ## Usage
 
 If you have not already done so, you will need to clone/install `asgs-mon` in your
-existing ASGS installation using `fetch asgs-mon` at the `asgsh` prompt. Once
+existing ASGS installation using `fetch asgs-mon` at the `asgsh` prompt. It will be installed
+in `$SCRIPTDIR/git/asgs-mon`. Once
 that is done, the command syntax to start it is as follows:
 
 `asgs-mon --pid <ASGS_PID> [--delay N] [-v]`
