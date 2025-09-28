@@ -6,6 +6,8 @@ Vigilant watchdog of ASGS.
 
 Please record as an [ASGS Issue](https://github.com/StormSurgeLive/asgs/issues) - https://github.com/StormSurgeLive/asgs/issues
 
+Be sure to use the [asgs-mon](https://github.com/StormSurgeLive/asgs/issues?q=is%3Aissue%20state%3Aopen%20label%3Aasgs-mon) label.
+
 ## Usage
 
 If you have not already done so, you will need to clone/install `asgs-mon` in your
