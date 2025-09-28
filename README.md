@@ -2,6 +2,10 @@
 
 Vigilant watchdog of ASGS.
 
+## Issues - Feature Requests, Bugs, Etc
+
+Please record as an [ASGS Issue](https://github.com/StormSurgeLive/asgs/issues) - https://github.com/StormSurgeLive/asgs/issues
+
 ## Usage
 
 If you have not already done so, you will need to clone/install `asgs-mon` in your
