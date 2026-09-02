@@ -1,0 +1,33 @@
+# Changes
+
+## 0.2.0 - 2026-09-01
+
+* Hardened process detection around the loaded `ASGS_CONFIG`; ambiguous matches
+  now require `--pid` instead of selecting the lowest PID.
+* Added one-monitor-per-profile locking.
+* Replaced shell-string check execution and sendmail invocation with list-form
+  process execution.
+* Enforced per-check timeouts and normalized bad/empty check results to UNKNOWN.
+* Changed notification throttling to transition/escalation/hush semantics so
+  persistent CRITICAL conditions do not email every monitor pass.
+* Refreshes ASGS state each pass and exports normalized `ASGS_MON_*` context.
+* Retained the legacy eight positional plugin arguments.
+* Added `--once`, `--check`, `--list`, `--enable`, `--disable`, `--validate`,
+  and `--status`.
+* Running monitors now rescan `active/` each pass, so check enable/disable
+  changes take effect without restart.
+* Expanded the Bash helper into a robust check API with safe color setup,
+  alert helpers, requirements, scheduling, file-age helpers, and compatibility
+  accessors.
+* Removed state-file `source`/evaluation from Bash helpers/checks.
+* Fixed known check issues: JSON warnings on STDOUT, queue state output,
+  STATEFILE error status, RUNDIR unit reporting, failed-dir diagnostics,
+  SYSLOG rotation/truncation, quoting/word splitting, and TTY handling.
+* Added atomic heartbeat/status JSON for external supervision and
+  `asgs-mon --status`.
+* Added a disabled-by-default adapter seam and JSONL example for future central
+  dashboard integration.
+* Added check templates, tests, CI, and an optional ASGS `fetch` integration
+  patch.
+* Uses `Util::H2O::More` conservatively for options/config/runtime objects and
+  `Dispatch::Fu` for top-level command dispatch.

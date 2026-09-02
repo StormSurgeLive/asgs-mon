@@ -2,124 +2,84 @@
 #--------------------------------------------------------------------------
 # 001-instance-status-check
 #--------------------------------------------------------------------------
-# Copyright(C) 2024 Brett Estrade
-# Copyright(C) 2024 Jason Fleming
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
 #
 # This file is part of the ADCIRC Surge Guidance System (ASGS).
-#
-# The ASGS is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# ASGS is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with the ASGS.  If not, see <http://www.gnu.org/licenses/>.
 #--------------------------------------------------------------------------
 
 use v5.12;
-# Note: 'use v5.12' implies: use strict; use warnings; use feature 'say'
+use strict;
+use warnings;
 
-package bin::instance_check;
-
-#
-# Check name:
-#
-#   001-instance-status-check
-#
-# Purpose:
-#
-#   checks the integrity of the instance JSON file, doesn't inspect
-#   any of the content, other than 'time.status.lastupdate'; this is
-#   done in other checks
-#
-
-use ASGSUtil        qw//;
-use Util::H2O::More qw/ddd h2o/;
-
-# get file name without preceding path
-$0 =~ /(.*\/)*(.+)/; # puts the filename into $2
-my $THIS = $2;
+use JSON::PP qw/decode_json encode_json/;
+use Term::ANSIColor qw/colored/;
 
 use constant {
-  OK       => 0,
-  WARNING  => 1,
-  CRITICAL => 2,
-  UNKNOWN  => 3,
-  NOTIFY   => 4,
+    OK       => 0,
+    WARNING  => 1,
+    CRITICAL => 2,
+    UNKNOWN  => 3,
+    NOTIFY   => 4,
 };
 
 my ($oldout, $oldexit, $count, $delay, $profile, $configfile, $statefile, $verbose) = @ARGV;
+$oldout    = $ENV{ASGS_MON_OLDOUT}  if exists $ENV{ASGS_MON_OLDOUT};
+$oldexit   = $ENV{ASGS_MON_OLDEXIT} if exists $ENV{ASGS_MON_OLDEXIT};
+$count     = $ENV{ASGS_MON_COUNT}    if exists $ENV{ASGS_MON_COUNT};
+$delay     = $ENV{ASGS_MON_DELAY}    if exists $ENV{ASGS_MON_DELAY};
+$profile   = $ENV{ASGS_MON_PROFILE}  if exists $ENV{ASGS_MON_PROFILE};
+$configfile= $ENV{ASGS_MON_CONFIG}   if exists $ENV{ASGS_MON_CONFIG};
+$statefile = $ENV{ASGS_MON_STATEFILE} if exists $ENV{ASGS_MON_STATEFILE};
+$verbose   = $ENV{ASGS_MON_VERBOSE}  if exists $ENV{ASGS_MON_VERBOSE};
 
-my $asgs_pid     = $ENV{ASGS_PID};
-my $state        = h2o ASGSUtil::state_from_file( $statefile );
-my $instancefile = sprintf qq{%s/status/asgs.instance.status.json}, $state->rundir;
+my $this = $0;
+$this =~ s{.*/}{};
+my $hpc  = $ENV{ASGS_MON_HPCENVSHORT} // $ENV{HPCENVSHORT} // q{unknown};
+my $file = $ENV{ASGS_MON_INSTANCEFILE};
+my $key  = q{time.status.lastupdated};
 
-# gets old output, if not the first run when it is an empty string
-if ($oldout) {
-  $oldout = decode_json $oldout;
+if (not defined $file or $file eq q{} or not -r $file) {
+    print "($hpc $profile - $this) WARNING INSTANCEFILE is not readable\n\n";
+    print "Expected: " . ($file // q{<undefined>}) . "\n";
+    print "The file may not have been created yet, or ASGS may not be progressing normally.\n";
+    exit WARNING;
 }
 
-my $instance    = eval { ASGSUtil::decode_json_from_file($instancefile) } or undef;
-my $hpcenvshort = $ENV{HPCENVSHORT};
-
-if (!$instance or $@) {
-  my $rundir      = $state->rundir;
-  my $scriptdir   = $state->scriptdir;
-  my $oldsubdir   = $state->oldsubdir;
-  my $syslog      = $state->syslog;
-  my $advisory    = $state->advisory;
-  
-  $@ = ($@) ? $@ : qq{An unknown error has occured when reading instance JSON!};
-  # the message is essentially an email format - first line is the subject;
-  # second line is blank
-  # 3rd line begins the message body
-  print STDERR <<EOF;
-($hpcenvshort $profile - $THIS) WARNING
-
-Message:
-$@
-
-Information:
-The instance file, "$instancefile"
-could not be opened for inspection. It could be that ASGS has not yet been started.
-But also indicates that ASGS is probably not currently running as expected.
-
-Details:
-
-RUNDIR=$rundir
-SCRIPTDIR=$scriptdir
-LASTSUBDIR=$oldsubdir
-SYSLOG=$syslog
-ADVISORY=$advisory
-
-EOF
-  exit WARNING;
-}
-
-# asgs-mon only prints output to STDOUT if the exit code is not OK, so this
-# following output will not be printed but is available for asgs-mon to remember
-# or post process in some way ...
-
-my $newout = {
-  lastupdated => $instance->{'time.status.lastupdated'},
+my $data = eval {
+    open my $fh, q{<}, $file or die "$!";
+    local $/;
+    my $json = <$fh>;
+    close $fh;
+    decode_json($json);
 };
 
-# terminal output for observer
-if ($oldout and $oldout->{lastupdated} ne $newout->{lastupdated}) {
-  printf STDERR qq{\ttime.status.lastupdate' went from %s to %s\n}, $oldout->{lastupdated}, $newout->{lastupdated};
-}
-elsif ($verbose) {
-  printf STDERR qq{(%s %s - %s) current update date: %s\n}, $hpcenvshort, colored($profile,'cyan'), colored($THIS, 'green'), $newout->{lastupdated}
+if (not $data or $@) {
+    my $err = $@ || q{unknown JSON decode error};
+    print "($hpc $profile - $this) WARNING INSTANCEFILE JSON is invalid\n\n";
+    print "File: $file\n\n$err\n";
+    exit WARNING;
 }
 
-# capture by asgs-mon and passed back in via first param
-print encode_json $newout;
+my $value = $data->{$key};
+my $newout = encode_json({ value => $value });
 
+my $old;
+if (defined $oldout and $oldout =~ /\A\s*\{/) {
+    $old = eval { decode_json($oldout) };
+}
+
+if ($verbose) {
+    if ($old && defined($old->{value}) && defined($value) && "$old->{value}" ne "$value") {
+        print STDERR "($hpc " . colored($profile // q{}, q{cyan}) . " - "
+            . colored($this, q{green}) . ") $key changed from $old->{value} to $value\n";
+    }
+    else {
+        my $display = defined $value ? $value : q{<undefined>};
+        print STDERR "($hpc " . colored($profile // q{}, q{cyan}) . " - "
+            . colored($this, q{green}) . ") $key: $display\n";
+    }
+}
+
+print $newout;
 exit OK;
-
-1;

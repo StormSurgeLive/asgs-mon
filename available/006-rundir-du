@@ -1,70 +1,34 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------------
 # 006-rundir-du
-#-------------------------------------------------------------------------
-# Copyright(C) 2024 Brett Estrade
-# Copyright(C) 2024 Jason Fleming
+#--------------------------------------------------------------------------
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
 #
 # This file is part of the ADCIRC Surge Guidance System (ASGS).
-#
-# The ASGS is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# ASGS is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with the ASGS.  If not, see <http://www.gnu.org/licenses/>.
 #--------------------------------------------------------------------------
 
-# this check just reports the total amount and change from last
-# check for $RUNDIR
+source "${ASGS_MON_LIB:-${ASGS_MON_PLUGINDIR}/_bash-helper-functions.sh}"
+mon_init "$@"
 
-THIS=$(basename -- $0)
 
-source $ASGS_MON_PLUGINDIR/_bash-helper-functions.sh
+mon_every 5
+mon_require_var RUNDIR
+mon_require_dir "$RUNDIR" RUNDIR
 
-# standard parameters
-OLDOUT=$1     # asgs-mon saves the first line of STDOUT for each check, on the next run it gets passed back
-OLDEXIT=$2    # the previous exit code is also saved and passed back 
-COUNT=$3      # iternation count of asgs-mon
-DELAY=$4      # number of seconds asgs-mon waits before checks 
-PROFILE=$5    # this is the ASGS profile name underwhich asgs-mon is running
-CONFIGFILE=$6 # config file associated with the $PROFILE 
-STATEFILE=$7  # path to the statefile associated with the $PROFILE
-VERBOSE=$8    # value of the "-v" flag passed t asgs-mon, so the plugin can use it if needed
+raw_kib=$(du -sk -- "$RUNDIR" 2>/dev/null | awk 'END {print $1}')
+human=$(du -sh -- "$RUNDIR" 2>/dev/null | awk 'END {print $1}')
 
-OK=0
-WARNING=1
-CRITICAL=2
-UNKNOWN=3
-NOTIFY=4
-
-PROFILE=${CY}$PROFILE${R}
-
-# example of a plugin controlled delay, i.e.,
-# runs every 5 times
-if [[ $COUNT != 1 && $(($COUNT % 5)) != 0 ]]; then
-  PERIOD=$(($DELAY * 5))
-  echo -n $OLDOUT # to preserve in asgs-mon's cache for next time it's actually run
-  exit $OK
+if ! [[ "$raw_kib" =~ ^[0-9]+$ ]]; then
+    mon_unknown "unable to determine RUNDIR disk usage" <<EOF
+RUNDIR: $RUNDIR
+EOF
 fi
 
-RAWDU=$(du $RUNDIR | tail -n 1 | awk '{print $1}')
-DU=$(du -h $RUNDIR | tail -n 1 | awk '{print $1}')
-
-DUDELTA="--"
-if [[ -n "$OLDOUT" ]]; then
-  DUDELTA=$(($RAWDU-$OLDOUT))
+delta="--"
+if [[ "${OLDOUT:-}" =~ ^[0-9]+$ ]]; then
+    delta=$(( raw_kib - OLDOUT ))
 fi
 
-if [[ $VERBOSE == 1 ]]; then
-  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) ${YW}RUNDIR is using ${B}$DU${R}, delta of $DUDELTA bytes" >&2
-fi 
-
-echo -n $RAWDU
-exit $OK
+mon_verbose "($HPCENVSHORT $COLORED_PROFILE - ${GR}$THIS${R}) ${YW}RUNDIR is using ${B}${human:-?}${R}, delta ${delta} KiB"
+mon_ok "$raw_kib"

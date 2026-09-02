@@ -2,98 +2,58 @@
 #--------------------------------------------------------------------------
 # 007-failed-dir
 #--------------------------------------------------------------------------
-# Copyright(C) 2024 Brett Estrade
-# Copyright(C) 2024 Jason Fleming
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
 #
 # This file is part of the ADCIRC Surge Guidance System (ASGS).
-#
-# The ASGS is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# ASGS is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with the ASGS.  If not, see <http://www.gnu.org/licenses/>.
 #--------------------------------------------------------------------------
 
-# this check just reports the total amount and change from last
-# check for $RUNDIR
+source "${ASGS_MON_LIB:-${ASGS_MON_PLUGINDIR}/_bash-helper-functions.sh}"
+mon_init "$@"
 
-THIS=$(basename -- $0)
 
-source $ASGS_MON_PLUGINDIR/_bash-helper-functions.sh
+mon_require_var RUNDIR
+mon_require_dir "$RUNDIR" RUNDIR
 
-# standard parameters
-OLDOUT=$1     # asgs-mon saves the first line of STDOUT for each check, on the next run it gets passed back
-OLDEXIT=$2    # the previous exit code is also saved and passed back 
-COUNT=$3      # iternation count of asgs-mon
-DELAY=$4      # number of seconds asgs-mon waits before checks 
-PROFILE=$5    # this is the ASGS profile name underwhich asgs-mon is running
-CONFIGFILE=$6 # config file associated with the $PROFILE 
-STATEFILE=$7  # path to the statefile associated with the $PROFILE
-VERBOSE=$8    # value of the "-v" flag passed t asgs-mon, so the plugin can use it if needed
+failed=()
+while IFS= read -r -d '' path; do
+    failed+=("$path")
+done < <(find "$RUNDIR" -maxdepth 1 -mindepth 1 -type d -name 'failed*' -print0 2>/dev/null)
 
-OK=0
-WARNING=1
-CRITICAL=2
-UNKNOWN=3
-NOTIFY=4
+count=${#failed[@]}
+if (( count > 0 )); then
+    newest=""
+    newest_time=0
+    for path in "${failed[@]}"; do
+        mtime=$(stat -c %Y -- "$path" 2>/dev/null || printf '0')
+        if (( mtime >= newest_time )); then
+            newest_time=$mtime
+            newest=$path
+        fi
+    done
 
-PROFILE=${CY}$PROFILE${R}
+    logdump="(scenario.log not present)"
+    if [[ -n "$newest" && -r "$newest/scenario.log" ]]; then
+        logdump=$(tail -n 20 -- "$newest/scenario.log" 2>/dev/null || true)
+    fi
 
-# example of a plugin controlled delay
-#if [[ $COUNT != 1 && $(($COUNT % 5)) != 0 ]]; then
-#  PERIOD=$(($DELAY * 5))
-#  echo "($HPCENVSHORT $PROFILE - $THIS) failed directory check skipped (run every $PERIOD seconds)" >&2
-#  echo -n $OLDOUT # to preserve in asgs-mon's cache for next time it's actually run
-#  exit $OK
-#fi
+    failed_body=$(
+        printf 'Failed directories found:\n\n'
+        printf '  %s\n' "${failed[@]}"
+        printf '\nLatest tail of %s/scenario.log:\n\n%s\n' "$newest" "$logdump"
+    )
 
-FAILEDCOUNT=$(ls -rtd $RUNDIR/failed* 2> /dev/null | wc -l)
-
-if [[ "$FAILEDCOUNT" -ge 1 ]]; then
-  OLDIFS=$IFS
-  IFS=$'\n'
-  ALLFAILED=$(ls -1rtd $RUNDIR/failed*)
-  NEWESTFAILED=$(ls -1rtd $RUNDIR/failed* | tail -n 1)
-  LOGDUMP=$(tail $NEWESTFAILED/scenario.log)
-  IFS=$OLDIFS
-
- cat <<EOF
-(${HPCENVSHORT} ${PROFILE} - ${YW}${THIS}${R}) ${YW}${B}WARNING${R} $FAILEDCOUNT failed directories detected!
-
+    mon_warning "$count failed director$( (( count == 1 )) && printf 'y' || printf 'ies') detected" <<EOF
 Suggested Remedy:
-Log into $HPCENV and see what's going on in $SCRIPTDIR.
+Inspect the failed run directory and scenario.log before restarting or removing it.
 
-Information:
-Could not find asgs_main.sh running with the pid of $ASGS_PID.
-
-System : $HPCENV
-ASGS   : $SCRIPTDIR
+System : ${HPCENV:-}
+ASGS   : ${SCRIPTDIR:-}
 Profile: $PROFILE
+RUNDIR : $RUNDIR
 
-Failed directories found:
-
-$ALLFAILED
-
-Latest tail of $NEWESTFAILED/scenario.log:
-
-$LOGDUMP
-
+$failed_body
 EOF
-
-  exit $WARNING;
 fi
 
-#if [[ $VERBOSE == 1 ]]; then
-#  # it's a distraction to say "all OK" except in a small % of situations
-#  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) 0 failed directories found (pid $ASGS_PID)" >&2 # echo to STDERR
-#fi 
-
-echo -n $FAILEDCOUNT 
-exit $OK
+mon_ok "$count"

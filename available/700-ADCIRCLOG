@@ -1,81 +1,48 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------------
-# etc/asgs-mon-plugins/010-STATEFILE
+# 700-ADCIRCLOG
 #--------------------------------------------------------------------------
-# Copyright(C) 2024 Brett Estrade
-# Copyright(C) 2024 Jason Fleming
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
 #
 # This file is part of the ADCIRC Surge Guidance System (ASGS).
-#
-# The ASGS is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# ASGS is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with the ASGS.  If not, see <http://www.gnu.org/licenses/>.
 #--------------------------------------------------------------------------
 
-# this check just reports the total amount and change from last
-# check for $RUNDIR
+source "${ASGS_MON_LIB:-${ASGS_MON_PLUGINDIR}/_bash-helper-functions.sh}"
+mon_init "$@"
 
-THIS=$(basename -- $0)
 
-source $ASGS_MON_PLUGINDIR/_bash-helper-functions.sh
+mon_require_var RUNDIR
+mon_require_dir "$RUNDIR" RUNDIR
 
-# standard parameters
-OLDOUT=$1     # asgs-mon saves the first line of STDOUT for each check, on the next run it gets passed back
-OLDEXIT=$2    # the previous exit code is also saved and passed back 
-COUNT=$3      # iternation count of asgs-mon
-DELAY=$4      # number of seconds asgs-mon waits before checks 
-PROFILE=$5    # this is the ASGS profile name underwhich asgs-mon is running
-CONFIGFILE=$6 # config file associated with the $PROFILE 
-STATEFILE=$7  # path to the statefile associated with the $PROFILE
-VERBOSE=$8    # value of the "-v" flag passed t asgs-mon, so the plugin can use it if needed
+advisory=${ADVISORY:-initialize}
+[[ -z "$advisory" || "$advisory" == 0 ]] && advisory=initialize
+search_root="$RUNDIR/$advisory"
 
-OK=0
-WARNING=1
-CRITICAL=2
-UNKNOWN=3
-NOTIFY=4
-
-PROFILE=${CY}$PROFILE${R}
-
-STATEFILEOK=0
-if [ -e "$STATEFILE" ]; then
-  source $STATEFILE
-  STATEFILEOK=1
+if [[ ! -d "$search_root" ]]; then
+    mon_verbose "($HPCENVSHORT $COLORED_PROFILE - ${YW}$THIS${R}) advisory directory not present yet: $search_root"
+    mon_ok "0"
 fi
 
-# there are no directories named "0"
-if [[ -z "$ADVISORY" || "$ADVISORY" == 0 ]]; then
-  ADVISORY=initialize
-fi
+shown=0
+while IFS= read -r -d '' log; do
+    ((shown++))
+    if [[ "$VERBOSE" == 1 ]]; then
+        printf '%s\n' "$log" >&2
+        printf '(%s %s - %s%s%s) - %sADCIRC LOG%s:\n' \
+            "$HPCENVSHORT" "$COLORED_PROFILE" "$GR" "$THIS" "$R" "$YW" "$R" >&2
+        tail -n 3 -- "$log" >&2
+    fi
+done < <(find "$search_root" -type f -name adcirc.log -print0 2>/dev/null)
 
-for ADCIRCLOG in $(find "$RUNDIR/$ADVISORY" -name adcirc.log); do
-  echo $ADCIRCLOG >&2
-  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}ADCIRC LOG${R}:" >&2
-  tail -n 3 $ADCIRCLOG | awk '{print "\033[0;32m" $0 "\033[0m"}' >&2
-done
+while IFS= read -r -d '' log; do
+    ((shown++))
+    if [[ "$VERBOSE" == 1 ]]; then
+        printf '%s\n' "$log" >&2
+        printf '(%s %s - %s%s%s) - %sSWAN LOG%s:\n' \
+            "$HPCENVSHORT" "$COLORED_PROFILE" "$GR" "$THIS" "$R" "$YW" "$R" >&2
+        tail -n 10 -- "$log" | grep 'Time of' >&2 || true
+    fi
+done < <(find "$search_root" -type f -name asgs_swan.prt -print0 2>/dev/null)
 
-
-# | grep -c PE
-for SWANLOG in $(find "$RUNDIR/$ADVISORY" -name asgs_swan.prt | grep PE0000); do
-  echo $SWANLOG >&2
-  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}SWAN LOG${R}:" >&2
-  tail -n 10 $SWANLOG | grep "Time of" | awk '{print "\033[0;32m" $0 "\033[0m"}'  >&2 
-done
-
-for SWANLOG in $(find "$RUNDIR/$ADVISORY" -name asgs_swan.prt | grep -v PE); do
-  echo $SWANLOG >&2
-  echo "($HPCENVSHORT $PROFILE - ${GR}$THIS${R}) - ${B}${YW}SWAN LOG${R}:" >&2
-  tail -n 10 $SWANLOG | grep "Time of" | awk '{print "\033[0;32m" $0 "\033[0m"}' >&2 
-done
-
-echo -n $STATEFILEOK
-exit $OK
+mon_ok "$shown"

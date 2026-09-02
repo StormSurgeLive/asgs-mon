@@ -2,257 +2,1240 @@
 #--------------------------------------------------------------------------
 # asgs-mon
 #--------------------------------------------------------------------------
-# Copyright(C) 2024 Brett Estrade
-# Copyright(C) 2024 Jason Fleming
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
 #
 # This file is part of the ADCIRC Surge Guidance System (ASGS).
 #
-# The ASGS is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# ASGS is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with the ASGS.  If not, see <http://www.gnu.org/licenses/>.
+# ASGS is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
 #--------------------------------------------------------------------------
 
 package bin::asgs_mon;
-use v5.10;
+
+use v5.12;
 use strict;
+use warnings;
+use feature qw/say/;
 
-use ASGSUtil qw//;
-use FindBin qw/$Bin/;
+use Dispatch::Fu     qw/dispatch on xdefault/;
+use Fcntl            qw/:flock/;
+use File::Basename   qw/basename/;
+use File::Spec       ();
+use FindBin          qw/$Bin/;
+use JSON::PP         qw/encode_json decode_json/;
+use POSIX            qw/setsid WNOHANG/;
+use Term::ANSIColor  qw/:constants colorstrip/;
+use Time::HiRes      qw/gettimeofday tv_interval/;
+use Util::H2O::More  qw/Getopt2h2o h2o ini2h2o/;
 
-use Term::ANSIColor qw/:constants colorstrip/;
-use JSON::PP        qw/encode_json decode_json/;
-use Util::H2O::More qw/ddd Getopt2h2o h2o ini2h2o/;
+our $VERSION = q{0.2.0};
 
 use constant {
-    TIMEOUT      => 30,    # seconds
-    CACHE        => {},    # place to store stuff while running
-    HUSHTABLE    => {},    # track gag order for notifications
-    HUSHLIMIT    => 1800,  # time window gag order is effect
+    DEFAULT_DELAY          => 10,
+    DEFAULT_TIMEOUT        => 30,
+    DEFAULT_ADAPTER_TIMEOUT=> 5,
+    DEFAULT_HUSH           => 1800,
+
     EXIT_SUCCESS => 0,
     EXIT_ERROR   => 1,
 
-    # plugin exit codes
-    OK       => 0,       # no alerts sent
-    WARNING  => 1,       # alert sent, subject to notification gag
-    CRITICAL => 2,       # alert sent regardless of notification gag (but updates gag table)
-    UNKNOWN  => 3,       # alert sent same as WARNING
-    NOTIFY   => 4,       # like critical, but used for pure notifications
+    OK       => 0,
+    WARNING  => 1,
+    CRITICAL => 2,
+    UNKNOWN  => 3,
+    NOTIFY   => 4,
 };
+
+my $ROOT       = File::Spec->rel2abs( $ENV{ASGS_MON_ROOT} // File::Spec->catdir($Bin, q{..}) );
+my $AVAILABLE  = File::Spec->catdir($ROOT, q{available});
+my $ACTIVE     = File::Spec->catdir($ROOT, q{active});
+my $ADAPTERS   = File::Spec->catdir($ROOT, q{adapters});
+my $ADAPT_AVAIL= File::Spec->catdir($ADAPTERS, q{available});
+my $ADAPT_ACTIVE=File::Spec->catdir($ADAPTERS, q{active});
+
+my %CACHE;
+my $LOCK_FH;
 
 local %ENV = %ENV;
 
-sub find_asgs_main_pid($) {
-    my $ASGS_CONFIG = shift;
-    my $_CMD = "ps aux | grep [a]sgs_main.sh | grep \"\$(basename \$ASGS_CONFIG)\" | awk '{ print \$2 }'";
-    my $ASGS_PID = `$_CMD`;
-    my $retcode  = $? >> 8;
+my $o = Getopt2h2o -autoundef, \@ARGV,
+    {
+        delay           => DEFAULT_DELAY,
+        timeout         => DEFAULT_TIMEOUT,
+        adapter_timeout => DEFAULT_ADAPTER_TIMEOUT,
+        v               => 1,
+        notify          => 1,
+    },
+    qw/
+        adapter_timeout|adapter-timeout=i
+        check=s
+        debug
+        delay=i
+        disable=s
+        enable=s
+        foreground
+        global_config|global-config=s
+        help
+        hush=i
+        list
+        notify!
+        once
+        passes=i
+        pid=i
+        silent|s
+        status
+        timeout=i
+        trace
+        validate
+        version
+        v
+    /;
 
-    if ( $retcode != EXIT_SUCCESS ) {
-        say STDERR (<<EOF);
-Error finding asgs_main.sh PID. Exiting ...
-EOF
-        exit $retcode;
-    }
+die "FATAL: unexpected argument(s): " . join(q{ }, @ARGV) . "\n" if @ARGV;
 
-    my @PIDS = sort { $a <=> $b } split /\n/, $ASGS_PID;
-
-    if ( @PIDS > 1 ) {
-        say STDERR (<<EOF);
-Found multiple PIDs. Make sure you don't have more than one instance of this configuration file,
-$ASGS_CONFIG, running. Using lowest numbered PID ...
-EOF
-    }
-
-    return  @PIDS; # send all pids
+usage(0) if $o->help;
+if ($o->version) {
+    say "asgs-mon $VERSION";
+    exit EXIT_SUCCESS;
 }
 
-my $o = Getopt2h2o \@ARGV, { delay => 10, v => 1 }, qw/debug delay=i foreground help hush=i pid=i trace silent|s v/;
+$o->v(0) if $o->silent;
 
-if ($o->help) {
-  print <<EOHELP;
-asgs-mon - Vigilant watchdog of ASGS.
+validate_numeric_option(q{delay},   $o->delay,   1);
+validate_numeric_option(q{timeout}, $o->timeout, 1);
+validate_numeric_option(q{adapter-timeout}, $o->adapter_timeout, 1);
+validate_numeric_option(q{hush}, $o->hush, 1) if defined $o->hush;
+validate_numeric_option(q{passes}, $o->passes, 1) if defined $o->passes;
+
+my @actions;
+push @actions, q{list}     if $o->list;
+push @actions, q{validate} if $o->validate;
+push @actions, q{status}   if $o->status;
+push @actions, q{check}    if defined $o->check;
+push @actions, q{enable}   if defined $o->enable;
+push @actions, q{disable}  if defined $o->disable;
+
+die "FATAL: choose only one of --list, --validate, --status, --check, --enable, or --disable\n"
+    if @actions > 1;
+
+my $mode = @actions ? $actions[0] : q{monitor};
+my $action = h2o {
+    mode => $mode,
+    opts => $o,
+};
+
+my $exit_code = dispatch {
+    my $a = shift;
+    xdefault $a->mode, q{monitor};
+}
+$action,
+    on q{monitor}  => sub { run_monitor(shift->opts) },
+    on q{list}     => sub { list_checks(); EXIT_SUCCESS },
+    on q{enable}   => sub { enable_check(shift->opts->enable); EXIT_SUCCESS },
+    on q{disable}  => sub { disable_check(shift->opts->disable); EXIT_SUCCESS },
+    on q{validate} => sub { validate_environment(shift->opts) },
+    on q{status}   => sub { show_status(shift->opts) },
+    on q{check}    => sub { run_one_check(shift->opts) };
+
+exit(defined($exit_code) ? $exit_code : EXIT_SUCCESS);
+
+sub usage {
+    my ($exit) = @_;
+    print <<"EOHELP";
+asgs-mon $VERSION - vigilant watchdog of ASGS
 
 Usage:
+  asgs-mon [options]
+  asgs-mon --once
+  asgs-mon --check CHECK
+  asgs-mon --list
+  asgs-mon --enable CHECK
+  asgs-mon --disable CHECK
+  asgs-mon --validate
+  asgs-mon --status
 
-This monitor is meant to be run inside of an ASGS Shell Environment and
-expects there is a running asgs_main.sh to monitor. It expects that there
-is also an ASGS_CONFIG defined and present.
+The normal monitor is intended to run inside a loaded ASGS profile. ASGS_CONFIG
+is the instance identity. STATEFILE and the current ASGS state are refreshed
+while the monitor runs.
 
-1. start up ASGS instance ('run' command) in one terminal
-2. most cases, run without options, in another terminal (be sure same profile
-   is loaded)
+Operator options:
+  --delay SECONDS       Seconds between passes (default: @{[DEFAULT_DELAY]})
+  --timeout SECONDS     Maximum runtime of one check (default: @{[DEFAULT_TIMEOUT]})
+  --hush SECONDS        Minimum repeat-notification interval (default: @{[DEFAULT_HUSH]})
+  --pid PID             Monitor this PID after validating it belongs to ASGS_CONFIG
+  --silent, -s          Suppress routine plugin status output
+  -v                    Verbose plugin status output (default)
+  --trace               Print each check immediately before it runs
+  --debug               Additional monitor diagnostics
+  --no-notify           Do not send notification email
+  --global-config FILE  Override ~/asgs-global.conf
+  --once                Run one pass of active checks and exit
+  --passes N            Run N monitor passes and exit (useful for testing)
 
-The monitor is verbose by default. To silence and show only warnings, use the
-"--silent" "-s" flag.
+Check management:
+  --list                Show available and enabled checks
+  --enable CHECK        Enable CHECK (exact name or unique numeric prefix)
+  --disable CHECK       Disable CHECK
+  --check CHECK         Run one available check once; email is disabled
+  --validate            Validate ASGS context, checks, notification setup
+  --status              Show the most recent monitor status snapshot
 
-Commandline Options:
+Other:
+  --adapter-timeout N   Maximum runtime of one active adapter (default: @{[DEFAULT_ADAPTER_TIMEOUT]})
+  --foreground          Compatibility option; checks already run synchronously
+  --version
+  --help
 
-  --debug
-  --delay SECONDS      Specify delay to start checks, default is 10 seconds
-  --foreground         Runs each check in the foreground
-  --help               Print this menu
-  --pid   PID          Specifies running ASGS process Id (not required)
-  --silence            Turns off verbose mode (on by default)
-  --trace              Prints check about to be performed
-
+Examples:
+  asgs-mon
+  asgs-mon --once -v
+  asgs-mon --enable 003
+  asgs-mon --disable 700-ADCIRCLOG
+  asgs-mon --check 007
+  asgs-mon --status
 EOHELP
-  exit;
+    exit($exit // 0);
 }
 
-if (! $o->pid) {
-  my $ASGS_CONFIG = $ENV{ASGS_CONFIG};
-  my ($ASGS_PID)  = find_asgs_main_pid $ASGS_CONFIG; # capture first in any list
-  die "FATAL! Can't find pid for asgs_main.sh. Is it running? Try using '--pid PID' ...\n\n"
-    if not $ASGS_PID;
-  chomp $ASGS_PID;
-  $o->pid($ASGS_PID);
+sub validate_numeric_option {
+    my ($name, $value, $min) = @_;
+    return if not defined $value;
+    die "FATAL: --$name must be an integer >= $min\n"
+        if $value !~ /\A\d+\z/ or $value < $min;
 }
 
-# silence verbose mode (verbose is "on" by default)
-$o->v(undef) if ($o->silent);
-
-my $CONFIG = sprintf(qq{%s/asgs-global.conf}, ( getpwuid $> )[7]);
-
-sub fatal_config_error {
-    my $msg = shift // "";
-    die <<EOF
-FATAL: $msg
-
-asgs-mon requires a properly configured '$CONFIG' be present so that notification emails will be sent. Example configuration,
-
-  [email]
-  ;; used by ASGS to send emails
-  from_address=info\@notify.stormsurge.live
-  reply_to_address=info\@notify.stormsurge.live
-  smtp_host=email-smtp.us-east-1.amazonaws.com
-  smtp_password=somepassword
-  smtp_port=587
-  smtp_username=someusername
-  
-  [monitor]
-  ;; used by asgs-mon to know to whom to send emails
-  notify_email=get-notifications\@myemailhost.tld
-
-EOF
+sub repo_files {
+    my ($dir) = @_;
+    return () if not -d $dir;
+    opendir my $dh, $dir or die "Can't open '$dir': $!\n";
+    my @files = grep {
+        $_ ne q{.}
+        and $_ ne q{..}
+        and $_ !~ /\AREADME(?:\.\w+)?\z/i
+        and $_ !~ /\A_/
+        and $_ !~ /\.sw.$/
+    } readdir $dh;
+    closedir $dh;
+    return sort_checks(@files);
 }
 
-if (!-e $CONFIG) {
- fatal_config_error("Can't find '$CONFIG'!");
+sub sort_checks {
+    return sort {
+        my ($an) = $a =~ /\A(\d+)/;
+        my ($bn) = $b =~ /\A(\d+)/;
+        ($an // 999999) <=> ($bn // 999999) || $a cmp $b;
+    } @_;
 }
 
-my $config = ini2h2o $CONFIG;
+sub resolve_available_check {
+    my ($requested) = @_;
+    die "FATAL: check name is required\n" if not defined $requested or $requested eq q{};
+    die "FATAL: invalid check name '$requested'\n"
+        if $requested =~ m{[/\\]} or $requested =~ /\.\./;
 
-if (!$config->monitor->notify_email) {
- fatal_config_error("Notification email not set in, '$CONFIG'!");
-}
+    my @available = repo_files($AVAILABLE);
+    return $requested if grep { $_ eq $requested } @available;
 
-# store in %ENV, that is available to all plugins
-$ENV{ASGS_PID} = $o->pid;
-
-say STDERR sprintf(<<EOF, $o->pid // q{NONE}, $o->delay);
-asgs-mon starting ...
-- running checks for asgs_main.sh (pid %s)
-- checks happen every %d seconds
-EOF
-
-## build up profile, run env info ##
-my $info = {};
-foreach my $envar (qw/SCRIPTDIR _ASGSH_CURRENT_PROFILE ASGS_CONFIG STATEFILE HPCENVSHORT/) {
-    $info->{ lc $envar } = $ENV{$envar};
-}
-
-h2o $info, qw/plugindir/;
-$info->{plugindir} = sprintf qq{%s/../active}, $Bin;
-
-# get state
-my $state = h2o ASGSUtil::state_from_file( $info->statefile );
-
-# add so scripts can easily read it to do includes and whatnot
-$ENV{ASGS_MON_PLUGINDIR} = $info->plugindir;
-
-opendir my $dh, $info->plugindir || die qq{Can't open $info->plugindir: $!};
-
-# get plugins in numerical order, filter out '.' and '..'
-my @PLUGINS = map { $_->[0] } sort { $a->[1] <=> $b->[1] } map { [ $_, $_=~/(\d+)/] } grep { !m/^_bash-helper-functions\.sh|^README$|^\.$|^\..$|\.sw.$/ } readdir $dh;
-
-# standard form passed to all scripts
-my $hushlimit = $o->hush // HUSHLIMIT;
-
-my $COUNT = 0;
-while (1) {
-    ++$COUNT;
-    foreach my $plugin (@PLUGINS) {
-        my $lastout = CACHE->{$plugin}->{output};  # remind plugin what it returned last time
-        my $lastret = CACHE->{$plugin}->{retcode}; # remind plugin what it returned last time
-
-        my $PARAMS = sprintf qq{'%s' '%s' '%s' '%s' '%s' '%s' '%s' '%s'}, $lastout // '', $lastret // '', $COUNT, $o->delay, $info->_asgsh_current_profile // '', $info->asgs_config // '', $info->statefile // '', $o->v // 0;
-
-        print qq{Running check: "$plugin"\n} if $o->trace;
-        my $plugin_fullpath = sprintf qq{%s/%s}, $info->plugindir, $plugin;
-        # DEBUG, sends command it's about to run to STDOUT
-        if ($o->debug) {
-          print <<EOF;
-DEBUG: $plugin_fullpath $PARAMS
-EOF
-        }
-        my $output          = `$plugin_fullpath $PARAMS`; # STDERR is reserved for plugin to output diagnostics
-        my $retcode         = $? >> 8;
-
-        # only print to STDOUT if plugin status ins not OK
-        if ( $retcode != OK ) {
-            my $now = time;
-            my $hushed = q{(alert suppressed)};
-            if ($retcode == CRITICAL
-                or $retcode == NOTIFY
-                or not HUSHTABLE->{$plugin}
-                or $now > (HUSHTABLE->{$plugin}+$hushlimit)) {
-              notify($plugin, $output);
-              HUSHTABLE->{$plugin} = $now;
-              $hushed = q{(alert sent)};
-            }
-            my @lines = split /\n/, $output;
-            my $subject = shift @lines;
-            # prints the first line of the error message, the whole
-            # message (subject + body) gets sent via the notify call
-            if ($retcode == CRITICAL) {
-              printf STDERR qq{%s%s%s %s\n}, RED, $subject, RESET, $hushed;
-            }
-            elsif ($retcode == NOTIFY) {
-              printf STDERR qq{%s%s%s %s\n}, CYAN, $subject, RESET, $hushed;
-            }
-            elsif ($retcode == WARNING) {
-              printf STDERR qq{%s%s%s %s\n}, YELLOW, $subject, RESET, $hushed;
-            }
-        }
-
-        # persist check output and persist it in CACHE, saves just the first line due
-        # to the way it's passed back in on subsequent calls
-        my @output = split /\n/, $output;
-        CACHE->{$plugin}->{output}  = shift @output // q{};
-        CACHE->{$plugin}->{retcode} = $retcode;
+    my @matches;
+    if ($requested =~ /\A\d+\z/) {
+        my $want = int($requested);
+        @matches = grep {
+            my ($n) = /\A(\d+)-/;
+            defined($n) && int($n) == $want;
+        } @available;
+    }
+    else {
+        @matches = grep { index($_, $requested) == 0 } @available;
     }
 
-    sleep $o->delay;
+    die "FATAL: no available check matches '$requested'\n" if not @matches;
+    die "FATAL: '$requested' is ambiguous: " . join(q{, }, @matches) . "\n"
+        if @matches > 1;
+    return $matches[0];
 }
-closedir $dh;
+
+sub active_checks {
+    my @active = repo_files($ACTIVE);
+    my @good;
+    for my $name (@active) {
+        my $path = File::Spec->catfile($ACTIVE, $name);
+        if (not -e $path) {
+            warn "WARNING: enabled check '$name' is a broken link; skipping\n";
+            next;
+        }
+        if (not -x $path) {
+            warn "WARNING: enabled check '$name' is not executable; skipping\n";
+            next;
+        }
+        push @good, $name;
+    }
+    return @good;
+}
+
+sub list_checks {
+    my %active_entry = map { $_ => 1 } repo_files($ACTIVE);
+    say "asgs-mon checks";
+    say "";
+    printf "%-8s %s\n", q{STATE}, q{CHECK};
+    printf "%-8s %s\n", q{-----}, q{-----};
+    for my $name (repo_files($AVAILABLE)) {
+        my $path = File::Spec->catfile($ACTIVE, $name);
+        my $state = !$active_entry{$name} ? q{disabled}
+                  : (-l $path && not -e $path) ? q{broken}
+                  : (-x $path) ? q{enabled}
+                  : q{invalid};
+        printf "%-8s %s\n", $state, $name;
+    }
+
+    my @custom = grep { not -e File::Spec->catfile($AVAILABLE, $_) } repo_files($ACTIVE);
+    if (@custom) {
+        say "";
+        say "Custom active checks:";
+        for my $name (@custom) {
+            my $path = File::Spec->catfile($ACTIVE, $name);
+            my $state = (-l $path && not -e $path) ? q{broken}
+                      : (-x $path) ? q{enabled}
+                      : q{invalid};
+            printf "  %-8s %s\n", $state, $name;
+        }
+    }
+
+    my @aa = repo_files($ADAPT_AVAIL);
+    if (@aa) {
+        my %enabled = map { $_ => 1 } repo_files($ADAPT_ACTIVE);
+        say "";
+        say "Adapters (future/dashboard integration; none required):";
+        printf "  %-8s %s\n", ($enabled{$_} ? q{enabled} : q{disabled}), $_ for @aa;
+    }
+}
+
+sub enable_check {
+    my ($requested) = @_;
+    my $name = resolve_available_check($requested);
+    my $src  = File::Spec->catfile(q{..}, q{available}, $name);
+    my $dest = File::Spec->catfile($ACTIVE, $name);
+
+    if (-l $dest && not -e $dest) {
+        die "FATAL: '$name' has a broken active symlink; run --disable $name and then enable it again\n";
+    }
+    if (-e $dest or -l $dest) {
+        say "$name is already enabled";
+        return;
+    }
+    symlink $src, $dest or die "FATAL: can't enable '$name': $!\n";
+    say "enabled $name";
+    say "A running asgs-mon will pick this up on its next pass.";
+}
+
+sub disable_check {
+    my ($requested) = @_;
+    my @active = repo_files($ACTIVE);
+    my $name;
+
+    if (grep { $_ eq $requested } @active) {
+        $name = $requested;
+    }
+    elsif ($requested =~ /\A\d+\z/) {
+        my $want = int($requested);
+        my @matches = grep {
+            my ($n) = /\A(\d+)-/;
+            defined($n) && int($n) == $want;
+        } @active;
+        die "FATAL: no enabled check matches '$requested'\n" if not @matches;
+        die "FATAL: '$requested' is ambiguous: " . join(q{, }, @matches) . "\n"
+            if @matches > 1;
+        $name = $matches[0];
+    }
+    else {
+        my @matches = grep { index($_, $requested) == 0 } @active;
+        die "FATAL: no enabled check matches '$requested'\n" if not @matches;
+        die "FATAL: '$requested' is ambiguous: " . join(q{, }, @matches) . "\n"
+            if @matches > 1;
+        $name = $matches[0];
+    }
+
+    my $path = File::Spec->catfile($ACTIVE, $name);
+    die "FATAL: refusing to remove non-symlink active check '$path'; remove it manually\n"
+        if not -l $path;
+    unlink $path or die "FATAL: can't disable '$name': $!\n";
+    say "disabled $name";
+    say "A running asgs-mon will stop running it on its next pass.";
+}
+
+sub require_asgs_context {
+    my ($opts, %args) = @_;
+    my @errors;
+
+    push @errors, q{_ASGSH_CURRENT_PROFILE is not set; load an ASGS profile}
+        if not defined $ENV{_ASGSH_CURRENT_PROFILE} or $ENV{_ASGSH_CURRENT_PROFILE} eq q{};
+    push @errors, q{ASGS_CONFIG is not set; load/define the ASGS configuration}
+        if not defined $ENV{ASGS_CONFIG} or $ENV{ASGS_CONFIG} eq q{};
+    push @errors, "ASGS_CONFIG '$ENV{ASGS_CONFIG}' is not a readable regular file"
+        if defined $ENV{ASGS_CONFIG} && $ENV{ASGS_CONFIG} ne q{}
+        && (not -f $ENV{ASGS_CONFIG} or not -r $ENV{ASGS_CONFIG});
+    push @errors, q{STATEFILE is not set by the loaded ASGS profile}
+        if not defined $ENV{STATEFILE} or $ENV{STATEFILE} eq q{};
+    push @errors, q{SCRIPTDIR is not set by the ASGS environment}
+        if not defined $ENV{SCRIPTDIR} or $ENV{SCRIPTDIR} eq q{};
+    push @errors, "SCRIPTDIR '$ENV{SCRIPTDIR}' is not a directory"
+        if defined $ENV{SCRIPTDIR} && $ENV{SCRIPTDIR} ne q{} && not -d $ENV{SCRIPTDIR};
+
+    if (@errors and not $args{soft}) {
+        die "FATAL: invalid ASGS monitor context:\n  - " . join("\n  - ", @errors) . "\n";
+    }
+    return @errors;
+}
+
+sub load_state {
+    my ($statefile) = @_;
+    return {} if not defined $statefile or not -r $statefile;
+
+    # ASGSUtil::state_from_file() is the canonical ASGS helper and is tiny:
+    # it reads key=value lines and lowercases keys.  Prefer it when available.
+    my $state;
+    if (eval { require ASGSUtil; 1 }) {
+        $state = eval { ASGSUtil::state_from_file($statefile) };
+    }
+
+    # Conservative fallback: parse the same state format without evaluating it.
+    if (not $state or ref($state) ne q{HASH}) {
+        my %s;
+        open my $fh, q{<}, $statefile or return {};
+        while (my $line = <$fh>) {
+            chomp $line;
+            next if $line =~ /\A\s*(?:#|\z)/;
+            $line =~ s/\A\s*export\s+//;
+            next if $line !~ /\A\s*([A-Za-z_]\w*)\s*=(.*)\z/;
+            my ($key, $value) = (lc($1), $2);
+            $value =~ s/\A\s+|\s+\z//g;
+            if ($value =~ /\A'(.*)'\z/s) {
+                $value = $1;
+            }
+            elsif ($value =~ /\A"(.*)"\z/s) {
+                $value = $1;
+                $value =~ s/\\"/"/g;
+                $value =~ s/\\\\/\\/g;
+            }
+            $s{$key} = $value;
+        }
+        close $fh;
+        $state = \%s;
+    }
+    return $state;
+}
+
+sub build_context {
+    my ($opts) = @_;
+    my $state = load_state($ENV{STATEFILE});
+
+    my $rundir     = first_defined($state->{rundir},     $ENV{RUNDIR});
+    my $syslog     = first_defined($state->{syslog},     $ENV{SYSLOG});
+    my $advisory   = first_defined($state->{advisory},   $ENV{ADVISORY});
+    my $lastsubdir = first_defined($state->{oldsubdir},  $state->{lastsubdir}, $ENV{LASTSUBDIR});
+    my $scriptdir  = first_defined($state->{scriptdir},  $ENV{SCRIPTDIR});
+    my $hpcenv     = first_defined($state->{hpcenv},     $ENV{HPCENV});
+    my $hpcshort   = first_defined($state->{hpcenvshort},$ENV{HPCENVSHORT});
+
+    my $ctx = h2o {
+        profile       => $ENV{_ASGSH_CURRENT_PROFILE},
+        config        => $ENV{ASGS_CONFIG},
+        statefile     => $ENV{STATEFILE},
+        scriptdir     => $scriptdir,
+        rundir        => $rundir,
+        syslog        => $syslog,
+        advisory      => $advisory,
+        lastsubdir    => $lastsubdir,
+        hpcenv        => $hpcenv,
+        hpcenvshort   => $hpcshort,
+        instancefile  => (defined $rundir ? File::Spec->catfile($rundir, q{status}, q{asgs.instance.status.json}) : undef),
+        hookfile      => (defined $rundir ? File::Spec->catfile($rundir, q{status}, q{hook.status.json}) : undef),
+        pid           => undef,
+        heartbeat     => undef,
+        statusfile    => undef,
+        lockfile      => undef,
+    };
+
+    return $ctx;
+}
+
+sub first_defined {
+    for (@_) {
+        return $_ if defined $_ and $_ ne q{};
+    }
+    return undef;
+}
+
+sub export_context {
+    my ($ctx, $count, $opts) = @_;
+
+    my %map = (
+        ASGS_MON_PROFILE      => $ctx->profile,
+        ASGS_MON_CONFIG       => $ctx->config,
+        ASGS_MON_STATEFILE    => $ctx->statefile,
+        ASGS_MON_SCRIPTDIR    => $ctx->scriptdir,
+        ASGS_MON_RUNDIR       => $ctx->rundir,
+        ASGS_MON_SYSLOG       => $ctx->syslog,
+        ASGS_MON_ADVISORY     => $ctx->advisory,
+        ASGS_MON_LASTSUBDIR   => $ctx->lastsubdir,
+        ASGS_MON_HPCENV       => $ctx->hpcenv,
+        ASGS_MON_HPCENVSHORT  => $ctx->hpcenvshort,
+        ASGS_MON_INSTANCEFILE => $ctx->instancefile,
+        ASGS_MON_HOOKFILE     => $ctx->hookfile,
+        ASGS_MON_PID          => $ctx->pid,
+        ASGS_MON_COUNT        => $count,
+        ASGS_MON_DELAY        => $opts->delay,
+        ASGS_MON_VERBOSE      => ($opts->v ? 1 : 0),
+        ASGS_MON_DEBUG        => ($opts->debug ? 1 : 0),
+        ASGS_MON_PLUGINDIR    => $ACTIVE,
+        ASGS_MON_LIB          => File::Spec->catfile($AVAILABLE, q{_bash-helper-functions.sh}),
+        ASGS_MON_HEARTBEAT    => $ctx->heartbeat,
+        ASGS_MON_STATUSFILE   => $ctx->statusfile,
+        ASGS_MON_EVENT_VERSION=> 1,
+    );
+
+    for my $k (keys %map) {
+        if (defined $map{$k}) {
+            $ENV{$k} = $map{$k};
+        }
+        else {
+            delete $ENV{$k};
+        }
+    }
+
+    # Preserve the original plugin environment while keeping dynamic state fresh.
+    $ENV{ASGS_PID} = $ctx->pid if defined $ctx->pid;
+    for my $pair (
+        [RUNDIR     => $ctx->rundir],
+        [SYSLOG     => $ctx->syslog],
+        [ADVISORY   => $ctx->advisory],
+        [LASTSUBDIR => $ctx->lastsubdir],
+        [SCRIPTDIR  => $ctx->scriptdir],
+        [HPCENV     => $ctx->hpcenv],
+        [HPCENVSHORT=> $ctx->hpcenvshort],
+    ) {
+        my ($k, $v) = @$pair;
+        $ENV{$k} = $v if defined $v;
+    }
+}
+
+sub proc_cmdline {
+    my ($pid) = @_;
+    return undef if not defined $pid or $pid !~ /\A\d+\z/;
+    my $file = "/proc/$pid/cmdline";
+    return undef if not -r $file;
+    open my $fh, q{<}, $file or return undef;
+    local $/;
+    my $raw = <$fh>;
+    close $fh;
+    return undef if not defined $raw;
+    my @args = grep { length } split /\0/, $raw;
+    return \@args;
+}
+
+sub pid_matches_config {
+    my ($pid, $config) = @_;
+    my $args = proc_cmdline($pid);
+    return 0 if not $args or not @$args;
+
+    my $has_asgs = grep { /(?:^|\/)asgs_main\.sh\z/ } @$args;
+    return 0 if not $has_asgs;
+
+    my $full = File::Spec->rel2abs($config);
+    my $base = basename($config);
+    my $has_config = grep {
+        $_ eq $config
+        || $_ eq $full
+        || $_ eq $base
+        || basename($_) eq $base
+        || index($_, $base) >= 0
+    } @$args;
+    return $has_config ? 1 : 0;
+}
+
+sub find_asgs_pids {
+    my ($config) = @_;
+    my @pids;
+    if (opendir my $dh, q{/proc}) {
+        while (my $entry = readdir $dh) {
+            next if $entry !~ /\A\d+\z/;
+            push @pids, int($entry) if pid_matches_config($entry, $config);
+        }
+        closedir $dh;
+    }
+    return sort { $a <=> $b } @pids;
+}
+
+sub select_asgs_pid {
+    my ($opts, $config) = @_;
+    if (defined $opts->pid) {
+        die "FATAL: --pid " . $opts->pid . " is not an asgs_main.sh process for '$config'\n"
+            if not pid_matches_config($opts->pid, $config);
+        return $opts->pid;
+    }
+
+    my @pids = find_asgs_pids($config);
+    die "FATAL: can't find a running asgs_main.sh for '$config'; start the profile or use --pid PID\n"
+        if not @pids;
+    die "FATAL: multiple asgs_main.sh processes match '$config': @pids; select one with --pid PID\n"
+        if @pids > 1;
+    return $pids[0];
+}
+
+sub runtime_paths {
+    my ($ctx) = @_;
+    my $tmp = $ENV{ASGS_TMPDIR};
+    $tmp = File::Spec->tmpdir if not defined $tmp or not -d $tmp;
+
+    my $identity = join q{|}, ($< // q{}), ($ctx->profile // q{}), ($ctx->config // q{});
+    require Digest::SHA;
+    my $hash = Digest::SHA::sha1_hex($identity);
+
+    return (
+        File::Spec->catfile($tmp, "asgs-mon-$hash.lock"),
+        File::Spec->catfile($tmp, "asgs-mon-$hash.heartbeat.json"),
+        File::Spec->catfile($tmp, "asgs-mon-$hash.status.json"),
+    );
+}
+
+sub acquire_instance_lock {
+    my ($ctx) = @_;
+    my ($lockfile) = runtime_paths($ctx);
+    open $LOCK_FH, q{>>}, $lockfile or die "FATAL: can't open monitor lock '$lockfile': $!\n";
+    if (not flock($LOCK_FH, LOCK_EX | LOCK_NB)) {
+        seek $LOCK_FH, 0, 0;
+        my $owner = <$LOCK_FH> // q{another asgs-mon};
+        chomp $owner;
+        die "FATAL: this ASGS profile is already being monitored ($owner)\n";
+    }
+    truncate $LOCK_FH, 0;
+    seek $LOCK_FH, 0, 0;
+    print {$LOCK_FH} "monitor_pid=$$ profile=" . ($ctx->profile // q{}) . " config=" . ($ctx->config // q{}) . "\n";
+    $LOCK_FH->flush if $LOCK_FH->can(q{flush});
+    $ctx->lockfile($lockfile);
+}
+
+sub load_notify_config {
+    my ($opts, $soft) = @_;
+    return h2o { enabled => 0, email => undef, config => undef, hush => ($opts->hush // DEFAULT_HUSH) }
+        if not $opts->notify;
+
+    my $global = $opts->global_config;
+    if (not defined $global or $global eq q{}) {
+        my $home = (getpwuid $>)[7];
+        $global = File::Spec->catfile($home, q{asgs-global.conf});
+    }
+
+    if (not -r $global) {
+        return h2o { enabled => 0, email => undef, config => $global, hush => ($opts->hush // DEFAULT_HUSH) }
+            if $soft;
+        die "FATAL: notification config '$global' is not readable; use --no-notify to run without email\n";
+    }
+
+    my $cfg = eval { ini2h2o $global };
+    if (not $cfg) {
+        return h2o { enabled => 0, email => undef, config => $global, hush => ($opts->hush // DEFAULT_HUSH) }
+            if $soft;
+        die "FATAL: can't parse '$global': $@\n";
+    }
+
+    my $email = eval { $cfg->monitor->notify_email };
+    my $configured_hush = eval { $cfg->monitor->hush_seconds };
+    my $hush = defined $opts->hush ? $opts->hush
+             : (defined $configured_hush && $configured_hush =~ /\A\d+\z/ ? $configured_hush : DEFAULT_HUSH);
+
+    if (not defined $email or $email eq q{}) {
+        return h2o { enabled => 0, email => undef, config => $global, hush => $hush }
+            if $soft;
+        die "FATAL: [monitor] notify_email is not set in '$global'; use --no-notify to run without email\n";
+    }
+
+    return h2o { enabled => 1, email => $email, config => $global, hush => $hush };
+}
+
+sub acquire_context {
+    my ($opts, %args) = @_;
+    require_asgs_context($opts, %args);
+    my $ctx = build_context($opts);
+    if (defined $ctx->config and -f $ctx->config) {
+        $ctx->config(File::Spec->rel2abs($ctx->config));
+        $ENV{ASGS_CONFIG} = $ctx->config;
+    }
+    my ($lock, $heartbeat, $statusfile) = runtime_paths($ctx);
+    $ctx->lockfile($lock);
+    $ctx->heartbeat($heartbeat);
+    $ctx->statusfile($statusfile);
+    return $ctx;
+}
+
+sub run_monitor {
+    my ($opts) = @_;
+    my $ctx = acquire_context($opts);
+    $ctx->pid(select_asgs_pid($opts, $ctx->config));
+    acquire_instance_lock($ctx);
+    my $notify = load_notify_config($opts, 0);
+    if ($notify->enabled && not command_in_path(q{asgs-sendmail})) {
+        die "FATAL: asgs-sendmail is not present in PATH; install/fix ASGS mail support or use --no-notify\n";
+    }
+
+    say STDERR "asgs-mon $VERSION starting ...";
+    say STDERR "- profile: " . ($ctx->profile // q{NONE});
+    say STDERR "- config : " . ($ctx->config // q{NONE});
+    say STDERR "- asgs pid: " . ($ctx->pid // q{NONE});
+    say STDERR "- checks every " . $opts->delay . " seconds; per-check timeout " . $opts->timeout . " seconds";
+    say STDERR "- repeat notifications limited to every " . $notify->hush . " seconds"
+        if $notify->enabled;
+    say STDERR "- notifications disabled" if not $notify->enabled;
+    say STDERR "";
+
+    my $count = 0;
+    my $pass_limit = $opts->once ? 1 : ($opts->passes // 0);
+    while (1) {
+        ++$count;
+
+        # Refresh ASGS state each pass. The loaded profile identifies the instance;
+        # the state file supplies the changing runtime location/advisory.
+        my $fresh = build_context($opts);
+        for my $field (qw/profile config statefile scriptdir rundir syslog advisory lastsubdir hpcenv hpcenvshort instancefile hookfile/) {
+            my $value = eval { $fresh->$field };
+            $ctx->$field($value) if defined $value;
+        }
+        export_context($ctx, $count, $opts);
+
+        my @plugins = active_checks();
+        if (not @plugins) {
+            warn "WARNING: no active checks are enabled\n";
+        }
+
+        my %seen;
+        for my $plugin (@plugins) {
+            $seen{$plugin} = 1;
+            run_plugin($plugin, $ctx, $opts, $notify, $count);
+        }
+
+        # Drop cache for checks disabled while the monitor is running.
+        delete $CACHE{$_} for grep { not $seen{$_} } keys %CACHE;
+
+        write_runtime_snapshot($ctx, $opts, $count);
+        last if $pass_limit && $count >= $pass_limit;
+        sleep $opts->delay;
+    }
+    return EXIT_SUCCESS;
+}
+
+sub run_one_check {
+    my ($opts) = @_;
+    require_asgs_context($opts);
+    my $name = resolve_available_check($opts->check);
+    my $ctx = acquire_context($opts);
+    $ctx->pid(select_asgs_pid($opts, $ctx->config));
+    export_context($ctx, 1, $opts);
+
+    my $notify = h2o { enabled => 0, email => undef, config => undef, hush => DEFAULT_HUSH };
+    my $path = File::Spec->catfile($AVAILABLE, $name);
+    my $result = execute_check($name, $path, $ctx, $opts, 1);
+    present_result($name, $result, $notify, $ctx, $opts);
+    return $result->{retcode} == OK ? EXIT_SUCCESS : $result->{retcode};
+}
+
+sub run_plugin {
+    my ($plugin, $ctx, $opts, $notify, $count) = @_;
+    my $path = File::Spec->catfile($ACTIVE, $plugin);
+    print STDERR qq{Running check: "$plugin"\n} if $opts->trace;
+
+    my $result = execute_check($plugin, $path, $ctx, $opts, $count);
+    present_result($plugin, $result, $notify, $ctx, $opts);
+    return $result;
+}
+
+sub execute_check {
+    my ($plugin, $path, $ctx, $opts, $count) = @_;
+    my $lastout = $CACHE{$plugin}->{output} // q{};
+    my $lastret = $CACHE{$plugin}->{retcode};
+
+    my @params = (
+        $lastout,
+        defined $lastret ? $lastret : q{},
+        $count,
+        $opts->delay,
+        $ctx->profile // q{},
+        $ctx->config // q{},
+        $ctx->statefile // q{},
+        $opts->v ? 1 : 0,
+    );
+
+    $ENV{ASGS_MON_OLDOUT} = $lastout;
+    defined $lastret ? ($ENV{ASGS_MON_OLDEXIT} = $lastret) : delete $ENV{ASGS_MON_OLDEXIT};
+
+    if ($opts->debug) {
+        say STDERR "DEBUG: exec " . join(q{ }, map { shell_display($_) } ($path, @params));
+    }
+
+    my $started = [gettimeofday];
+    my ($output, $retcode, $timed_out, $exec_error) =
+        run_capture($path, \@params, $opts->timeout);
+    my $duration_ms = int(tv_interval($started) * 1000);
+
+    if ($timed_out) {
+        $retcode = UNKNOWN;
+        my $host = $ctx->hpcenvshort // q{unknown};
+        $output = "($host " . ($ctx->profile // q{}) . " - $plugin) UNKNOWN check timed out\n\n"
+                . "The check exceeded " . $opts->timeout . " seconds and was terminated.\n";
+    }
+    elsif (defined $exec_error) {
+        $retcode = UNKNOWN;
+        my $host = $ctx->hpcenvshort // q{unknown};
+        $output = "($host " . ($ctx->profile // q{}) . " - $plugin) UNKNOWN check could not execute\n\n$exec_error\n";
+    }
+    elsif ($retcode < OK or $retcode > NOTIFY) {
+        my $bad = $retcode;
+        $retcode = UNKNOWN;
+        my $host = $ctx->hpcenvshort // q{unknown};
+        $output = "($host " . ($ctx->profile // q{}) . " - $plugin) UNKNOWN invalid check exit code\n\n"
+                . "Check returned unsupported exit code $bad. Expected 0..4.\n"
+                . ($output ne q{} ? "\nOriginal output:\n$output" : q{});
+    }
+    elsif ($retcode != OK and $output !~ /\S/) {
+        $retcode = UNKNOWN;
+        my $host = $ctx->hpcenvshort // q{unknown};
+        $output = "($host " . ($ctx->profile // q{}) . " - $plugin) UNKNOWN check returned no alert message\n\n"
+                . "The check returned a non-OK exit status without STDOUT notification content.\n";
+    }
+
+    my ($subject) = split /\n/, ($output // q{}), 2;
+    $subject //= q{};
+
+    my $result = {
+        retcode     => $retcode,
+        output      => $output // q{},
+        subject     => $subject,
+        timed_out   => $timed_out ? 1 : 0,
+        duration_ms => $duration_ms,
+        ran_at      => time,
+    };
+
+    return $result;
+}
+
+sub present_result {
+    my ($plugin, $result, $notify, $ctx, $opts) = @_;
+    my $retcode = $result->{retcode};
+    my $output  = $result->{output};
+
+    my $oldret  = $CACHE{$plugin}->{retcode};
+    my $now     = time;
+    my $sent    = 0;
+    my $suppressed = 0;
+
+    if ($retcode != OK) {
+        my $last_alert = $CACHE{$plugin}->{alerted_at};
+        my $severity_escalated = defined($oldret) && severity_rank($retcode) > severity_rank($oldret);
+        my $transition = (!defined($oldret) || $oldret == OK);
+
+        my $due = !defined($last_alert)
+               || $transition
+               || $severity_escalated
+               || $now >= ($last_alert + $notify->hush);
+
+        if ($notify->enabled && $due) {
+            $sent = notify($plugin, $output, $notify) ? 1 : 0;
+            $CACHE{$plugin}->{alerted_at} = $now if $sent;
+        }
+        elsif ($notify->enabled) {
+            $suppressed = 1;
+        }
+
+        my $tag = $sent ? q{(alert sent)}
+                : $suppressed ? q{(alert suppressed)}
+                : q{(notification disabled)};
+        print_alert_line($retcode, $result->{subject}, $tag);
+    }
+
+    # Optional recovery notifications are deliberately not sent by default.
+    # Recovery still clears the transition state so the next failure alerts
+    # immediately rather than waiting for the old hush window.
+    if ($retcode == OK && defined($oldret) && $oldret != OK) {
+        delete $CACHE{$plugin}->{alerted_at};
+        say STDERR "($plugin) recovered to OK" if $opts->v;
+    }
+
+    my @lines = split /\n/, $output;
+    $CACHE{$plugin}->{output}  = shift(@lines) // q{};
+    $CACHE{$plugin}->{retcode} = $retcode;
+    $CACHE{$plugin}->{last}    = {
+        %$result,
+        notified  => $sent ? JSON::PP::true : JSON::PP::false,
+        suppressed=> $suppressed ? JSON::PP::true : JSON::PP::false,
+    };
+
+    my $event = build_event($plugin, $result, $ctx, $sent, $suppressed);
+    run_adapters($event, $opts);
+}
+
+sub severity_rank {
+    my ($code) = @_;
+    return 0 if $code == OK;
+    return 1 if $code == WARNING;
+    return 1 if $code == UNKNOWN;
+    return 2 if $code == NOTIFY;
+    return 3 if $code == CRITICAL;
+    return 1;
+}
+
+sub print_alert_line {
+    my ($retcode, $subject, $tag) = @_;
+    $subject //= q{asgs-mon check alert};
+    if ($retcode == CRITICAL) {
+        printf STDERR "%s%s%s %s\n", RED, $subject, RESET, $tag;
+    }
+    elsif ($retcode == NOTIFY) {
+        printf STDERR "%s%s%s %s\n", CYAN, $subject, RESET, $tag;
+    }
+    elsif ($retcode == WARNING) {
+        printf STDERR "%s%s%s %s\n", YELLOW, $subject, RESET, $tag;
+    }
+    else {
+        printf STDERR "%s%s%s %s\n", MAGENTA, $subject, RESET, $tag;
+    }
+}
 
 sub notify {
-  my ($plugin, $output) = @_;
-  my @lines = map { my $x=colorstrip($_); $x=~s/\(B//g; $x } split /\n/, $output; # also strips Term::ANSIColor codes
-  my $subject = shift @lines; # Note: emojis in the subject line come from the plugin's message
-  shift @lines; # assume blank
-  my $email = $config->monitor->notify_email;
-  open my $fh, q{|-}, qq{asgs-sendmail --to "$email" --subject "$subject"};
-  my $body = join (qq{\n}, @lines);
-  print $fh $body;
-  close $fh;
+    my ($plugin, $output, $notify) = @_;
+    my @lines = map {
+        my $x = colorstrip($_ // q{});
+        $x =~ s/\(B//g;
+        $x;
+    } split /\n/, $output;
+
+    my $subject = shift(@lines) // "asgs-mon alert: $plugin";
+    shift @lines if @lines && $lines[0] eq q{};
+    my $body = join "\n", @lines;
+
+    open my $fh, q{|-}, q{asgs-sendmail},
+        q{--to}, $notify->email,
+        q{--subject}, $subject
+        or do {
+            warn "WARNING: unable to start asgs-sendmail for '$plugin': $!\n";
+            return 0;
+        };
+    print {$fh} $body;
+    if (not close $fh) {
+        warn "WARNING: asgs-sendmail failed for '$plugin' (status " . ($? >> 8) . ")\n";
+        return 0;
+    }
+    return 1;
 }
+
+sub run_capture {
+    my ($path, $args, $timeout) = @_;
+    pipe my $reader, my $writer or return (q{}, UNKNOWN, 0, "pipe failed: $!");
+
+    my $pid = fork();
+    return (q{}, UNKNOWN, 0, "fork failed: $!") if not defined $pid;
+
+    if ($pid == 0) {
+        close $reader;
+        eval { setsid() };
+        open STDOUT, q{>&}, $writer or POSIX::_exit(126);
+        close $writer;
+
+        exec {$path} $path, @$args or POSIX::_exit(127);
+    }
+
+    close $writer;
+    my $output = q{};
+    my $timed_out = 0;
+    my $exec_error;
+    my $child_status;
+
+    my $ok = eval {
+        local $SIG{ALRM} = sub { die "__ASGS_MON_TIMEOUT__\n" };
+        alarm $timeout;
+        local $/;
+        my $data = <$reader>;
+        $output = defined $data ? $data : q{};
+        alarm 0;
+        1;
+    };
+    if (not $ok) {
+        alarm 0;
+        if ($@ =~ /__ASGS_MON_TIMEOUT__/) {
+            $timed_out = 1;
+            kill q{TERM}, -$pid;
+            select undef, undef, undef, 0.25;
+            my $waited = waitpid($pid, WNOHANG);
+            if ($waited == $pid) {
+                $child_status = $?;
+            }
+            elsif ($waited == 0) {
+                kill q{KILL}, -$pid;
+            }
+        }
+        else {
+            $exec_error = $@ || q{unknown child read error};
+            kill q{TERM}, -$pid;
+        }
+    }
+    close $reader;
+
+    if (not defined $child_status) {
+        waitpid($pid, 0);
+        $child_status = $?;
+    }
+    my $raw_status = $child_status;
+    my $status = ($raw_status & 127)
+        ? 128 + ($raw_status & 127)
+        : ($raw_status >> 8);
+    if ($status == 127 && not $timed_out) {
+        $exec_error ||= "exec failed for '$path'";
+    }
+    return ($output, $status, $timed_out, $exec_error);
+}
+
+sub build_event {
+    my ($plugin, $result, $ctx, $sent, $suppressed) = @_;
+    return {
+        schema       => 1,
+        event        => q{check_result},
+        epoch        => time,
+        host         => scalar(gethostname_safe()),
+        hpcenv       => $ctx->hpcenv,
+        hpcenvshort  => $ctx->hpcenvshort,
+        profile      => $ctx->profile,
+        config       => $ctx->config,
+        asgs_pid     => 0 + ($ctx->pid // 0),
+        monitor_pid  => 0 + $$,
+        rundir       => $ctx->rundir,
+        advisory     => $ctx->advisory,
+        check        => $plugin,
+        status_code  => 0 + $result->{retcode},
+        status       => status_name($result->{retcode}),
+        subject      => colorstrip($result->{subject} // q{}),
+        duration_ms  => 0 + ($result->{duration_ms} // 0),
+        notified     => $sent ? JSON::PP::true : JSON::PP::false,
+        suppressed   => $suppressed ? JSON::PP::true : JSON::PP::false,
+    };
+}
+
+sub gethostname_safe {
+    eval {
+        require Sys::Hostname;
+        return Sys::Hostname::hostname();
+    } || $ENV{HOSTNAME} || q{unknown};
+}
+
+sub status_name {
+    my ($code) = @_;
+    return q{OK}       if $code == OK;
+    return q{WARNING}  if $code == WARNING;
+    return q{CRITICAL} if $code == CRITICAL;
+    return q{UNKNOWN}  if $code == UNKNOWN;
+    return q{NOTIFY}   if $code == NOTIFY;
+    return q{UNKNOWN};
+}
+
+sub run_adapters {
+    my ($event, $opts) = @_;
+    return if not -d $ADAPT_ACTIVE;
+
+    my $json = encode_json($event);
+    for my $name (repo_files($ADAPT_ACTIVE)) {
+        my $path = File::Spec->catfile($ADAPT_ACTIVE, $name);
+        next if not -x $path;
+        # Stable adapter contract v1: one JSON event is supplied as argv[1].
+        # Adapter stdout is ignored; stderr is available to the operator.
+        my (undef, $code, $timeout, $err) =
+            run_capture($path, [$json], $opts->adapter_timeout);
+        if ($opts->debug && ($timeout || defined $err || $code != 0)) {
+            warn "DEBUG: adapter '$name' failed"
+               . ($timeout ? q{ (timeout)} : q{})
+               . (defined($err) ? " ($err)" : q{})
+               . " exit=$code\n";
+        }
+    }
+}
+
+sub write_runtime_snapshot {
+    my ($ctx, $opts, $count) = @_;
+    my %checks;
+    for my $name (sort_checks(keys %CACHE)) {
+        next if not $CACHE{$name}->{last};
+        my $last = $CACHE{$name}->{last};
+        $checks{$name} = {
+            status_code => 0 + ($last->{retcode} // UNKNOWN),
+            status      => status_name($last->{retcode} // UNKNOWN),
+            subject     => colorstrip($last->{subject} // q{}),
+            ran_at      => 0 + ($last->{ran_at} // 0),
+            duration_ms => 0 + ($last->{duration_ms} // 0),
+            notified    => $last->{notified},
+            suppressed  => $last->{suppressed},
+        };
+    }
+
+    my $snapshot = {
+        schema      => 1,
+        epoch       => time,
+        monitor_pid => 0 + $$,
+        asgs_pid    => 0 + ($ctx->pid // 0),
+        profile     => $ctx->profile,
+        hpcenv      => $ctx->hpcenv,
+        hpcenvshort => $ctx->hpcenvshort,
+        config      => $ctx->config,
+        statefile   => $ctx->statefile,
+        rundir      => $ctx->rundir,
+        syslog      => $ctx->syslog,
+        advisory    => $ctx->advisory,
+        pass        => 0 + $count,
+        checks      => \%checks,
+    };
+
+    atomic_write_json($ctx->statusfile, $snapshot);
+    atomic_write_json($ctx->heartbeat, {
+        schema      => 1,
+        epoch       => time,
+        monitor_pid => 0 + $$,
+        asgs_pid    => 0 + ($ctx->pid // 0),
+        profile     => $ctx->profile,
+        config      => $ctx->config,
+    });
+}
+
+sub atomic_write_json {
+    my ($path, $data) = @_;
+    return if not defined $path;
+    my $tmp = "$path.$$";
+    if (open my $fh, q{>}, $tmp) {
+        print {$fh} JSON::PP->new->canonical->encode($data), "\n";
+        close $fh;
+        rename $tmp, $path or unlink $tmp;
+    }
+}
+
+sub show_status {
+    my ($opts) = @_;
+    my @errors = require_asgs_context($opts, soft => 1);
+    if (@errors) {
+        say STDERR "Can't locate this profile's monitor status:";
+        say STDERR "  - $_" for @errors;
+        return EXIT_ERROR;
+    }
+
+    my $ctx = acquire_context($opts, soft => 1);
+    my $file = $ctx->statusfile;
+    if (not -r $file) {
+        say STDERR "No status snapshot found for " . ($ctx->profile // q{this profile}) . ".";
+        say STDERR "Start asgs-mon first.";
+        return EXIT_ERROR;
+    }
+
+    open my $fh, q{<}, $file or die "Can't read '$file': $!\n";
+    local $/;
+    my $data = eval { decode_json(<$fh>) };
+    close $fh;
+    if (not $data) {
+        say STDERR "Status snapshot '$file' is invalid JSON.";
+        return EXIT_ERROR;
+    }
+
+    my $age = time - ($data->{epoch} // 0);
+    say "ASGS monitor status";
+    say "  profile     : " . ($data->{profile} // q{});
+    say "  platform    : " . ($data->{hpcenvshort} // $data->{hpcenv} // q{});
+    say "  ASGS PID    : " . ($data->{asgs_pid} // q{});
+    say "  monitor PID : " . ($data->{monitor_pid} // q{});
+    say "  advisory    : " . ($data->{advisory} // q{});
+    say "  RUNDIR      : " . ($data->{rundir} // q{});
+    say "  snapshot age: ${age}s";
+    say "";
+    printf "%-32s %-10s %-8s %s\n", q{CHECK}, q{STATUS}, q{AGE}, q{LAST};
+    printf "%-32s %-10s %-8s %s\n", q{-----}, q{------}, q{---}, q{----};
+
+    for my $name (sort_checks(keys %{ $data->{checks} || {} })) {
+        my $r = $data->{checks}{$name};
+        my $r_age = time - ($r->{ran_at} // 0);
+        printf "%-32s %-10s %-8s %s\n",
+            $name,
+            ($r->{status} // q{UNKNOWN}),
+            "${r_age}s",
+            ($r->{subject} // q{});
+    }
+    return EXIT_SUCCESS;
+}
+
+sub validate_environment {
+    my ($opts) = @_;
+    my @problems;
+    my @warnings;
+
+    my @context = require_asgs_context($opts, soft => 1);
+    push @problems, @context;
+
+    if (not -d $AVAILABLE) {
+        push @problems, "available directory '$AVAILABLE' is missing";
+    }
+    if (not -d $ACTIVE) {
+        push @problems, "active directory '$ACTIVE' is missing";
+    }
+
+    for my $name (repo_files($ACTIVE)) {
+        my $path = File::Spec->catfile($ACTIVE, $name);
+        push @problems, "active check '$name' is a broken symlink" if -l $path && not -e $path;
+        push @problems, "active check '$name' is not executable" if -e $path && not -x $path;
+    }
+
+    if (defined $ENV{STATEFILE} && $ENV{STATEFILE} ne q{} && not -r $ENV{STATEFILE}) {
+        push @warnings, "STATEFILE '$ENV{STATEFILE}' does not exist/read yet";
+    }
+
+    if (defined $ENV{ASGS_CONFIG} && -r $ENV{ASGS_CONFIG}) {
+        my @pids = find_asgs_pids(File::Spec->rel2abs($ENV{ASGS_CONFIG}));
+        push @warnings, "no matching asgs_main.sh process is currently running" if not @pids;
+        push @problems, "multiple matching asgs_main.sh processes: @pids" if @pids > 1;
+    }
+
+    my $notify = load_notify_config($opts, 1);
+    if ($opts->notify) {
+        push @warnings, "notification email is not configured in '" . ($notify->config // q{}) . "'"
+            if not $notify->enabled;
+        push @warnings, "asgs-sendmail is not present in PATH"
+            if not command_in_path(q{asgs-sendmail});
+    }
+
+    say "asgs-mon validation";
+    if (@problems) {
+        say "  ERROR: $_" for @problems;
+    }
+    if (@warnings) {
+        say "  WARN : $_" for @warnings;
+    }
+    if (not @problems && not @warnings) {
+        say "  OK: profile, checks, process, and notification setup look ready";
+    }
+    elsif (not @problems) {
+        say "  OK with warnings";
+    }
+
+    return @problems ? EXIT_ERROR : EXIT_SUCCESS;
+}
+
+sub command_in_path {
+    my ($cmd) = @_;
+    for my $dir (File::Spec->path) {
+        my $p = File::Spec->catfile($dir, $cmd);
+        return $p if -x $p && not -d $p;
+    }
+    return;
+}
+
+sub shell_display {
+    my ($s) = @_;
+    $s //= q{};
+    return q{''} if $s eq q{};
+    return $s if $s =~ /\A[A-Za-z0-9_.,:\/+=@%-]+\z/;
+    $s =~ s/'/'"'"'/g;
+    return "'$s'";
+}
+
+1;

@@ -1,199 +1,466 @@
-# asgs-mon 
+# asgs-mon
 
 Vigilant watchdog of ASGS.
 
-## Issues - Feature Requests, Bugs, Etc
+`asgs-mon` is an operator-oriented companion to the ADCIRC Surge Guidance
+System (ASGS). It is deliberately small: the supervisor does orchestration,
+state handling, process validation, notification limiting, and result export;
+individual checks remain short executable programs.
 
-Please record as an [ASGS Issue](https://github.com/StormSurgeLive/asgs/issues) - https://github.com/StormSurgeLive/asgs/issues
+The normal operating model is still the one that works well in production:
+run ASGS in one tmux pane and `asgs-mon` in the pane beside it.
 
-Be sure to use the [asgs-mon](https://github.com/StormSurgeLive/asgs/issues?q=is%3Aissue%20state%3Aopen%20label%3Aasgs-mon) label.
-
-## Usage
-
-If you have not already done so, you will need to clone/install `asgs-mon` in your
-existing ASGS installation using `fetch asgs-mon` at the `asgsh` prompt. It will be installed
-in `$SCRIPTDIR/git/asgs-mon` which contains the links to plugins that will actually be used in the `active` 
-subdirectory. The `~/asgs-global.conf` must also be configured with the email address that should
-receive notifications of significant error conditions as follows:
+```text
++----------------------------------+----------------------------------+
+| ASGS / asgs_main.sh              | asgs-mon                         |
+|                                  |                                  |
+| normal ASGS progress             | process / state / queue / logs   |
+|                                  | warnings and notifications       |
++----------------------------------+----------------------------------+
 ```
-[monitor]
-;; used by asgs-mon to know to whom to send emails
-notify_email=get-notifications\@myemailhost.tld
-```
-Once those steps are complete, the command syntax to start it is as follows:
-```
-asgs-mon --pid <ASGS_PID> [--delay N] [-v]
-```
-This monitor is meant to be run inside of an ASGS Shell Environment (i.e., `asgsh`) and
-expects there is a running `asgs_main.sh` to monitor. It expects that there
-is also an `ASGS_CONFIG` defined and present.
 
-1. start up ASGS instance (`run` command) in one terminal
-2. most cases, run without options, in another terminal (be sure same profile
-   is loaded)
+## ASGS integration contract
 
-The monitor is verbose by default. To silence and show only warnings, use the
-`--silent` `-s` flag.
+Load the ASGS profile first. `asgs-mon` treats the profile as authoritative:
 
-## Command Line Options
+* `_ASGSH_CURRENT_PROFILE` identifies the profile;
+* `ASGS_CONFIG` identifies the ASGS instance;
+* `STATEFILE` supplies changing runtime state;
+* `SCRIPTDIR` identifies the ASGS installation.
+
+`asgs-mon` no longer tries to invent an independent configuration identity.
+It validates that the selected `asgs_main.sh` process belongs to the current
+`ASGS_CONFIG`, and it refreshes the state file every monitor pass.
+
+The current dynamic values are exported to checks as `ASGS_MON_*` variables,
+including `ASGS_MON_RUNDIR`, `ASGS_MON_SYSLOG`, `ASGS_MON_ADVISORY`,
+`ASGS_MON_INSTANCEFILE`, and `ASGS_MON_HOOKFILE`.
+
+The original eight positional plugin arguments are retained for compatibility.
+
+The normal ASGS Perl dependency set already includes `Util::H2O::More` and
+`Dispatch::Fu`; this revision uses those existing ASGS dependencies rather than
+adding a separate monitor-specific stack.
+
+## Installation from ASGS
+
+ASGS already supports:
+
+```bash
+fetch asgs-mon
+```
+
+which installs the repository under:
+
+```text
+$SCRIPTDIR/git/asgs-mon
+```
+
+and the ASGS shell includes `git/asgs-mon/bin` in `PATH`.
+
+An optional ASGS-side integration patch is included under `integration/` to
+also create the conventional `$SCRIPTDIR/bin/asgs-mon` symlink.
+
+## Normal operator workflow
+
+In tmux, split the window vertically.
+
+In the ASGS pane:
+
+```bash
+load profile TXLA22a_GFS_queenbeec_be
+run
+```
+
+In the monitor pane, load the same profile and start the monitor:
+
+```bash
+load profile TXLA22a_GFS_queenbeec_be
+asgs-mon
+```
+
+The monitor discovers the single `asgs_main.sh` whose command line matches
+the loaded `ASGS_CONFIG`. If more than one process matches, it refuses to
+guess; use `--pid PID` to select one explicitly.
+
+## Command line
+
+```text
+asgs-mon [options]
+asgs-mon --once
+asgs-mon --check CHECK
+asgs-mon --list
+asgs-mon --enable CHECK
+asgs-mon --disable CHECK
+asgs-mon --validate
+asgs-mon --status
+```
+
+Important options:
 
 | Option | Meaning |
-| ------ | ------- |
-| `--debug` |        |
-| `--delay SECONDS`  | Specify time increment between checks, default is 30 seconds |
-| `--foreground`     | Runs each check in the foreground |
-| `--help`           | Print this menu |
-| `--pid PID`      | Specifies running ASGS process ID (not required) |
-| `--silence`        | Turns off verbose mode (on by default) |
-| `--trace`          | Prints check about to be performed |
+|---|---|
+| `--delay SECONDS` | seconds between passes, default 10 |
+| `--timeout SECONDS` | maximum runtime for one check, default 30 |
+| `--hush SECONDS` | minimum repeat-notification interval, default 1800 |
+| `--pid PID` | explicitly select and validate an ASGS process |
+| `--silent`, `-s` | suppress routine check status |
+| `-v` | verbose operator output, default |
+| `--trace` | print each check before execution |
+| `--debug` | monitor execution diagnostics |
+| `--no-notify` | run without email |
+| `--global-config FILE` | override `~/asgs-global.conf` |
+| `--once` | run one pass and exit |
+| `--passes N` | run N passes and exit; useful for testing |
+| `--check CHECK` | run one available check once, without email |
+| `--validate` | check ASGS context, process, checks, and notification setup |
+| `--status` | show the latest local status snapshot |
 
-## Introduction
+`--foreground` remains accepted for compatibility. Checks are already executed
+synchronously.
 
-`bin/asgs-mon` is a supervisory or watchdog program that is meant to be run
-by Operators who wish to keep a vigilant eye on their ASGS instance.
+## Turning checks on and off
 
-## Using Existing Plugins
+Checks continue to use the familiar `available/` + `active/` model, but an
+operator no longer needs to create symlinks manually.
 
-The main executable `bin/asgs-mon` does not do any checks. Instead it runs
-any executable file that resides in the `active` subdirectory. So each "check"
-must be a script or executable program that's been placed in that directory.
+List checks:
 
-`asgs-mon` executes each script in the `active`
-subdirectory, passing each one a fixed and identical set of parameters.
-It also expects a certain range of meaningful exit codes. If you are familiar
-with the **Nagios** monitoring tool, `asgs-mon` is modeled to work the same way.
+```bash
+asgs-mon --list
+```
 
-Making a plugin "active" is done by creating an soft linke (`ln -s`) to the script you want to run. It doesn't
-have to be in `./available`, but it probably will be. This is a similar model to how some web servers do it, so
-the activation pattern is replicated here.
+Enable a check:
 
-Many of the existing plugins in the table below are the artifacts of development and testing
-and were created to explore possibilities within monitoring. The ones enabled by default
-were found to actually be useful in production. 
+```bash
+asgs-mon --enable 003
+```
 
-| File Name                  | Description                                               | Enabled by Default |
-|----------------------------|-----------------------------------------------------------|--------------------|
-| 000-asgs_main-pid-check    | ensures asgs_main.sh is running with existing PID         | ✅                 |
-| 001-instance-status-check  | confirm that valid `asgs.instance.status.json` exists; reports `time.status.lastupdated` but does not act on it | |
-| 002-hook-status-check      | same as above but for the `hook.status.json` file         |                    |
-| 003-syslog-progress        | reports time since `SYSLOG` was last updated; sends a WARNING message if it has been longer than 6 hours | |
-| 004-instance-status-progress | same as above but for the `asgs.instance.status.json` file |                 |
-| 005-hook-status-progress   | same as above but for the `hook.status.json` file         |                    |
-| 006-rundir-du              | reports storage used in the current `RUNDIR` as well as change from last execution (runs every 5th execution of `asgs-mon`) | ✅ |
-| 007-failed-dir             | detects `failed.*` directories in `RUNDIR` and notifies the Operator if one exists  | ✅ |
-| 008-heart-beat             | sends an error if `asgs-mon` has not run in the past 3 hours |                 |
-| 009-syslog-scan            | shows lines of `SYSLOG` added since last check            | ✅                 |
-| 010-STATEFILE              | sanity check to ensure the `STATEFILE` has valid info (runs every 5th execution of `asgs-mon`) | ✅  |
-| 012-queue-check            | displays `USER`'s queued or running jobs (runs every 5th execution of `asgs-mon`) | ✅ |
-| 700-ADCIRCLOG              | reports the last 3 lines of all `adcirc.log` files and `asgs_swan.prt` files found in the `ADVISORY` directory specified in the `STATEFILE` | ✅ |
-| 999-critical-test          | sends error email if `$ASGS_TMPDIR/.critical` file exists | |
-| 999-notify-test            | same as above but for file named `.notify`                | |
-| 999-warning-test           | same as above but for file named `.warning`               | |
+or:
 
-## Creating New Plugins
+```bash
+asgs-mon --enable 003-syslog-progress
+```
 
-Please look at what is in the `available` subdirectory. There are examples that use
-Perl and Bash. Early experience is suggesting that plugins should favor being
-created in Bash, and that Perl should only be considered if you only need the
-power of it for things like processing JSON, communicating to webservers, etc.
+Disable it:
 
-In the case of plugins, simpler is better. They should be designed to do
-one very specific check. And a good rule of thumb is that they should not
-be more than 75 or 100 lines in length.
+```bash
+asgs-mon --disable 003
+```
 
-### Environmental Variables
+A running monitor rescans `active/` on every pass, so a check enabled or
+disabled from another tmux pane takes effect on the next pass without
+restarting `asgs-mon`.
 
-In addition to all the variables available when an ASGS Profile is loaded,
-`asgs-mon` adds the following:
+The CLI only removes symlinks. It refuses to delete an active regular file,
+which protects locally-created/custom checks.
 
-| Variable | Meaning |
-|--------- |---------|
-|`ASGS_PID` |holds the operating system process ID of the `asgs_main.sh` that is listed in the `ps` output as running with the current `$ASGS_CONFIG`
+## Default active checks
 
-### Plugin Command Line Options
+| Check | Purpose |
+|---|---|
+| `000-asgs_main-pid-check` | verifies the selected PID still belongs to this ASGS config |
+| `006-rundir-du` | reports RUNDIR usage and change |
+| `007-failed-dir` | reports `failed*` run directories |
+| `009-syslog-scan` | shows lines added to SYSLOG; handles truncation/rotation |
+| `010-STATEFILE` | validates current state and prints RUNDIR/advisory |
+| `012-queue-check` | reports the operator's scheduler queue when supported |
+| `700-ADCIRCLOG` | tails ADCIRC/SWAN progress logs in the current advisory |
 
-It is best to take a look at the simpler checks that are written in `bash` to
-get a clear understanding the options passed into each plugin scripts when they are
-run.
+Additional checks remain available but disabled by default.
 
-| parameter | meaning | 
-| --------- | ------- |
-| `OLDOUT=$1` |  `asgs-mon` saves the first line of `STDOUT` for each check, on the next run it gets passed back |
-| `OLDEXIT=$2` | the previous exit code is also saved and passed back |
-| `COUNT=$3`   | iternation count of `asgs-mon`| 
-| `DELAY=$4`    | number of seconds `asgs-mon` waits before checks| 
-| `PROFILE=$5`   | this is the ASGS profile associated with this instance of `asgs-mon`|
-| `CONFIGFILE=$6` | config file associated with the `$PROFILE` |
-| `STATEFILE=$7` | path to the statefile associated with the `$PROFILE`|
-| `VERBOSE=$8`  | value of the `-v` flag passed to `asgs-mon`, so the plugin can use it if needed |
+## Notification limiting
 
-Some of the variables are available in the environment. Bash scripts can
-refer directly that's in `env` when `asgs-mon` is started. Similarly, Perl
-scripts are able to inspect the `%ENV` hash.
+The old behavior could repeatedly send CRITICAL email every monitor pass.
+The monitor now limits repeated notifications by check.
 
-However other things like the `HOOKFILE` and `INSTANCEFILE` need to be derived,
-and being the main source of info for the initial checks, figuring out these
-paths is better done by `asgs-mon` than the plugin.
+A notification is sent immediately when:
 
-`COUNT` and `DELAY` are there so that the plugin can decide to actually check at
-an interval based on the check iteration count and/or the amount of time between
+* a check transitions from OK to a non-OK state;
+* severity escalates;
+* the repeat-hush period has expired.
+
+Repeated failures of the same severity are suppressed until the hush period
+expires. A return to OK clears the failure transition state, so a later new
+failure alerts immediately.
+
+The default hush interval is 1800 seconds. Override it with:
+
+```bash
+asgs-mon --hush 900
+```
+
+or in `~/asgs-global.conf`:
+
+```ini
+[monitor]
+notify_email=operator@example.org
+hush_seconds=1800
+```
+
+`CRITICAL` is no longer allowed to generate email every ten seconds merely
+because the process remains down.
+
+## Process detection
+
+The monitor does not use `ps | grep | awk` command strings.
+
+On Linux it inspects `/proc/PID/cmdline` and requires:
+
+1. the process command line to contain `asgs_main.sh`; and
+2. the process command line to identify the loaded `ASGS_CONFIG`.
+
+If zero processes match, startup fails. If multiple processes match, startup
+fails instead of silently selecting the lowest PID. `--pid` still exists, but
+the supplied PID is validated against the same criteria.
+
+A per-profile file lock prevents accidentally running two monitor supervisors
+for the same ASGS configuration.
+
+The monitor deliberately stays attached to the PID selected at startup. If ASGS
+is stopped and restarted with a new PID, restart `asgs-mon` as well; it will not
+silently reattach to a different process.
+
+## Check execution hardening
+
+Checks are executed with list-form `exec`; plugin output is never interpolated
+back into a shell command.
+
+Each check has a timeout. A timed-out check is terminated and reported as
+`UNKNOWN`, while the monitor continues to the remaining checks.
+
+Unsupported exit codes and non-OK checks that produce no alert message are
+converted to useful `UNKNOWN` results rather than generating empty email.
+
+The supervisor preserves the traditional exit codes:
+
+| Code | Status |
+|---:|---|
+| 0 | OK |
+| 1 | WARNING |
+| 2 | CRITICAL |
+| 3 | UNKNOWN |
+| 4 | NOTIFY |
+
+## Bash check API
+
+`available/_bash-helper-functions.sh` is now the supported include for Bash
 checks.
 
-### Plugin Exit Codes and STDOUT
+A new check can be very small:
 
-| Exit Code | Meaning |
-| --------- | ------- | 
-| `OK=0`     | everything is A-okay, no email sent |
-| `WARNING=1` | something is not quite right, email alert sent |
-| `CRITICAL=2`| something is very bad, email alert sent |
-| `UNKNOWN=3` | unable to determine severity, email alert is sent |
-| `NOTIFY=4`  | used for notification |
+```bash
+#!/usr/bin/env bash
 
-Ideally, all checks will be returning `OK` all the time.
+source "${ASGS_MON_LIB:-${ASGS_MON_PLUGINDIR}/_bash-helper-functions.sh}"
+mon_init "$@"
 
-As mentioned in the Command Line Options section above, `asgs-mon` passes in the first line of the `STDOUT`
-received during the previous run of the plugin. This is to allow for a plugin to
-have some sort of way to access the state of the previous plugin execution without
-have to worry about private output files. `STDOUT` can be any number of lines,
-but `asgs-mon` only really cares about the first line when the exit code or
-status is `OK`. All warning messages or important information sent when it's
-not `OK` should be directed to `STDOUT`. As we shall see in the next section,
-`STDERR` is reserved internally for the plugin itself.
+mon_require_var RUNDIR
 
-Any `STDOUT` that is printed by the plugin is handled as follows, given the status:
+if [[ -e "$RUNDIR/something.bad" ]]; then
+    mon_warning "something.bad exists" <<EOF
+RUNDIR: $RUNDIR
 
-| STDOUT | Result |
-| -------| -------|
-| `OK`   | first line is stored and passed back to the plugin the next time it's run |
-| anything else | the first line is saved like; then the entire body of what's printed via `STDOUT` is used to create the notification email, see below.
+Suggested Remedy:
+Inspect the file.
+EOF
+fi
 
-The notification email sent if the exit code or status code is not `OK` uses the
-`STDOUT` as follows:
+mon_ok "no-problem"
+```
 
-1. the first line is turned into the SUBJECT of the email
-2. the second line is discarded (standard email, same as a git commit also)
-3. everything else is sent as the BODY of the email
+Useful helpers include:
 
-### Plugins and STDERR
+```text
+mon_init
+mon_verbose
+mon_debug
 
-`STDERR` is reserved for use by each plugin to print status messages to the
-terminal. `asgs-mon` can be run in the background, but really it's meant to
-run in the foreground within some view of the Operator. Email alerts are
-there because an Op can't be there 24/7.
+mon_ok
+mon_warning
+mon_critical
+mon_unknown
+mon_notify
 
-As illustrated in the Plugin Command Line Options section above, each plugin is passed in the value of the
-"verbosity" that may be turned on when running `asgs-mon` using the `-v`
-flag. The plugin may wish to respect that and it is recommended that it do
-so. There are no shortage of cases where the plugin will output to `STDERR`
-unconditionally, but this should be done sparingly to maintain a high
-signal/noise ratio for any Op who is monitoring things on a terminal.
+mon_every
+mon_skip
+mon_require_var
+mon_require_cmd
+mon_require_file
+mon_require_dir
+mon_have
+mon_file_age
+mon_human_age
 
-### Helper Libraries for Common Needs
+get_instancefile
+get_hookfile
+```
 
-Bash: `available/_bash-helper-functions.sh` 
+`get_instancefile` and `get_hookfile` remain for compatibility, but they no
+longer `source` the ASGS state file. The supervisor parses state and exports
+the resolved paths instead.
 
-`source $SCRIPTDIR/available/_bash-helper-functions.sh` 
+### `mon_every`
 
-Perl: `PERL/ASGSUtils.pm`
+Instead of repeating:
 
-`use ASGSUtils;`
+```bash
+if [[ $COUNT != 1 && $((COUNT % 5)) != 0 ]]; then
+    echo -n "$OLDOUT"
+    exit 0
+fi
+```
+
+a check can simply use:
+
+```bash
+mon_every 5
+```
+
+Skipped passes automatically preserve the previous first-line state.
+
+## Plugin state
+
+The original positional interface remains:
+
+| Argument | Meaning |
+|---|---|
+| `$1` | previous first line (`OLDOUT`) |
+| `$2` | previous exit code (`OLDEXIT`) |
+| `$3` | monitor pass count |
+| `$4` | monitor delay |
+| `$5` | ASGS profile |
+| `$6` | ASGS config |
+| `$7` | state file |
+| `$8` | verbosity |
+
+New checks should prefer the environment where convenient:
+
+```text
+ASGS_MON_OLDOUT
+ASGS_MON_OLDEXIT
+ASGS_MON_COUNT
+ASGS_MON_DELAY
+ASGS_MON_VERBOSE
+ASGS_MON_DEBUG
+
+ASGS_MON_PROFILE
+ASGS_MON_CONFIG
+ASGS_MON_STATEFILE
+ASGS_MON_PID
+
+ASGS_MON_SCRIPTDIR
+ASGS_MON_RUNDIR
+ASGS_MON_SYSLOG
+ASGS_MON_ADVISORY
+ASGS_MON_LASTSUBDIR
+ASGS_MON_HPCENV
+ASGS_MON_HPCENVSHORT
+
+ASGS_MON_INSTANCEFILE
+ASGS_MON_HOOKFILE
+```
+
+## `Util::H2O::More` and `Dispatch::Fu`
+
+The supervisor intentionally uses these conservatively.
+
+`Util::H2O::More` continues to handle command-line options through
+`Getopt2h2o`, ASGS global INI configuration through `ini2h2o`, and the small
+runtime/action objects through `h2o`.
+
+`Dispatch::Fu` is used for the top-level command dispatch (`monitor`, `list`,
+`enable`, `disable`, `check`, `validate`, `status`). It replaces a growing
+conditional command router without changing the check model.
+
+Neither module is pushed into Bash checks or used merely to make simple code
+more abstract.
+
+## Local status and future dashboards
+
+Every monitor pass writes two small, atomic JSON files in `ASGS_TMPDIR` (or
+the system temporary directory):
+
+* a heartbeat identifying the monitor/profile/PIDs;
+* a status snapshot containing the latest result of each check.
+
+`asgs-mon --status` reads the snapshot and prints a compact view. In a spare
+tmux pane, a simple non-interactive at-a-glance view is also possible without
+turning the monitor into a TUI:
+
+```bash
+watch -n 2 asgs-mon --status
+```
+
+This is also useful for external supervision: another service can determine
+whether the heartbeat itself has gone stale, something a dead `asgs-mon`
+process cannot report about itself.
+
+### Adapter seam
+
+`adapters/active/` is an optional export seam. No adapter is enabled by
+default.
+
+After each check, an active adapter receives a versioned JSON event as its
+first argument. Adapter failures do not change the check result or stop the
+monitor, and adapters have their own short timeout.
+
+An example `adapters/available/jsonl-log` is included. The same event contract
+can later be used by an HTTPS adapter that reports to a central web dashboard
+without changing individual checks.
+
+See `adapters/README.md`.
+
+## Developing a check
+
+Use:
+
+```bash
+asgs-mon --check 007
+```
+
+to run one available check once without sending email.
+
+Then:
+
+```bash
+asgs-mon --enable 007
+```
+
+to place it into the live monitor set.
+
+Templates are under `examples/`.
+
+Keep checks focused on one condition. The supervisor owns orchestration,
+notification policy, state refresh, process identity, timeouts, and adapters.
+
+## Validation
+
+Before an operational run:
+
+```bash
+asgs-mon --validate
+```
+
+It checks the loaded ASGS context, active check links/executability, matching
+ASGS process, state-file availability, and notification configuration.
+
+## Testing
+
+Run:
+
+```bash
+prove -v t
+```
+
+and, when ShellCheck is installed:
+
+```bash
+shellcheck available/* examples/*.bash adapters/available/*
+```
+
+GitHub Actions CI is included.
+
+## Issues
+
+Please record issues in the ASGS issue tracker and use the `asgs-mon` label.

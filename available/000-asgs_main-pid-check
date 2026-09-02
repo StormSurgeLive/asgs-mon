@@ -1,80 +1,43 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------------
-# asgs-mon-plugins/000-asgs_main-pid-check
+# 000-asgs_main-pid-check
 #--------------------------------------------------------------------------
-# Copyright(C) 2024 Brett Estrade
-# Copyright(C) 2024 Jason Fleming
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
 #
 # This file is part of the ADCIRC Surge Guidance System (ASGS).
-#
-# The ASGS is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# ASGS is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with the ASGS.  If not, see <http://www.gnu.org/licenses/>.
 #--------------------------------------------------------------------------
 
-THIS=$(basename -- $0)
+source "${ASGS_MON_LIB:-${ASGS_MON_PLUGINDIR}/_bash-helper-functions.sh}"
+mon_init "$@"
 
-source $ASGS_MON_PLUGINDIR/_bash-helper-functions.sh
 
-# standard parameters
-OLDOUT=$1     # asgs-mon saves the first line of STDOUT for each check, on the next run it gets passed back
-OLDEXIT=$2    # the previous exit code is also saved and passed back 
-COUNT=$3      # iternation count of asgs-mon
-DELAY=$4      # number of seconds asgs-mon waits before checks 
-PROFILE=$5    # this is the ASGS profile name underwhich asgs-mon is running
-CONFIGFILE=$6 # config file associated with the $PROFILE 
-STATEFILE=$7  # path to the statefile associated with the $PROFILE
-VERBOSE=$8    # value of the "-v" flag passed t asgs-mon, so the plugin can use it if needed
+mon_require_var ASGS_PID
 
-OK=0
-WARNING=1
-CRITICAL=2
-UNKNOWN=3
-NOTIFY=4
-
-COLORED_PROFILE=${CY}$PROFILE${R}
-
-if [[ -z "$ASGS_PID" || -1 -eq "$ASGS_PID" ]]; then
-  echo "($HPCENVSHORT $PROFILE - $THIS) Check skipped, no ASGS_PID provided" >&2 # echo to STDERR
-  exit $OK
-fi 
-
-FOUNDPID=$(ps aux | grep "$ASGS_PID" | grep -vc grep)
-if [[ $FOUNDPID == 0 ]]; then
- cat <<EOF
-(${HPCENVSHORT} ${COLORED_PROFILE} - ${YW}${THIS}${R}) ${YW}${B}WARNING${R} asgs_main.sh went away!
-
+if [[ ! "$ASGS_PID" =~ ^[0-9]+$ || ! -r "/proc/$ASGS_PID/cmdline" ]]; then
+    mon_critical "asgs_main.sh went away" <<EOF
 Suggested Remedy:
-Log into $HPCENV and see what's going on in $SCRIPTDIR.
+Log into ${HPCENV:-the ASGS host} and inspect ${SCRIPTDIR:-the ASGS installation}.
 
 Information:
-Could not find asgs_main.sh running with the pid of $ASGS_PID.
+The configured ASGS process ID $ASGS_PID no longer exists.
 
-System : $HPCENV
-ASGS   : $SCRIPTDIR
 Profile: $PROFILE
-
-Details:
-  checked with command,
-
-  \$(ps aux | grep $ASGS_PID | grep -vc grep)
+Config : $CONFIGFILE
 EOF
-
-  exit $CRITICAL;
 fi
 
-if [[ $VERBOSE == 1 ]]; then
-  echo "($HPCENVSHORT $COLORED_PROFILE - ${GR}$THIS${R}) Found asgs_main.sh (pid $ASGS_PID)" >&2 # echo to STDERR
-fi 
+cmdline=$(tr '\0' ' ' < "/proc/$ASGS_PID/cmdline" 2>/dev/null || true)
+config_base=$(basename -- "$CONFIGFILE")
+if [[ "$cmdline" != *asgs_main.sh* || "$cmdline" != *"$config_base"* ]]; then
+    mon_critical "ASGS PID no longer matches this profile" <<EOF
+PID $ASGS_PID exists, but its command line no longer identifies the expected
+asgs_main.sh instance.
 
-echo -n "Found asgs_main.sh (pid $ASGS_PID)"
-exit $OK
+Expected config: $CONFIGFILE
+Command line   : $cmdline
+EOF
+fi
+
+mon_verbose "($HPCENVSHORT $COLORED_PROFILE - ${GR}$THIS${R}) Found asgs_main.sh (pid $ASGS_PID)"
+mon_ok "pid=$ASGS_PID"

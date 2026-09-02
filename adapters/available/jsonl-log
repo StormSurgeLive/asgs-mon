@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#--------------------------------------------------------------------------
+# jsonl-log - example asgs-mon adapter
+#--------------------------------------------------------------------------
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
+#
+# Adapter contract v1: argv[1] is one JSON check_result event.
+# This adapter is intentionally NOT enabled by default.
+#--------------------------------------------------------------------------
+
+set -u
+
+event=${1-}
+[[ -n "$event" ]] || exit 2
+
+out=${ASGS_MON_ADAPTER_LOG:-}
+if [[ -z "$out" ]]; then
+    base=${ASGS_TMPDIR:-${TMPDIR:-/tmp}}
+    out="$base/asgs-mon-events.jsonl"
+fi
+
+printf '%s\n' "$event" >> "$out"

@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: '5.40'
+
+      - name: Dependencies
+        run: |
+          cpanm --notest Util::H2O::More Dispatch::Fu Config::Tiny
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Perl syntax
+        run: perl -c bin/asgs-mon
+
+      - name: Tests
+        run: prove -v t
+
+      - name: ShellCheck
+        run: |
+          rc=0
+          while IFS= read -r -d '' f; do
+            if head -n 1 "$f" | grep -q bash; then
+              shellcheck -x -e SC1090,SC1091,SC2034,SC2154 "$f" || rc=1
+            fi
+          done < <(find available examples adapters/available -type f -print0)
+          exit "$rc"

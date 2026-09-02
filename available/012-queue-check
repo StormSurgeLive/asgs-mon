@@ -1,65 +1,53 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------------
-# etc/asgs-mon-plugins/012-queue-check
+# 012-queue-check
 #--------------------------------------------------------------------------
-# Copyright(C) 2024 Brett Estrade
-# Copyright(C) 2024 Jason Fleming
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
 #
 # This file is part of the ADCIRC Surge Guidance System (ASGS).
-#
-# The ASGS is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# ASGS is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with the ASGS.  If not, see <http://www.gnu.org/licenses/>.
 #--------------------------------------------------------------------------
 
-# this check just reports the total amount and change from last
-# check for $RUNDIR
+source "${ASGS_MON_LIB:-${ASGS_MON_PLUGINDIR}/_bash-helper-functions.sh}"
+mon_init "$@"
 
-THIS=$(basename -- $0)
 
-source $ASGS_MON_PLUGINDIR/_bash-helper-functions.sh
+mon_every 5
 
-# standard parameters
-OLDOUT=$1     # asgs-mon saves the first line of STDOUT for each check, on the next run it gets passed back
-OLDEXIT=$2    # the previous exit code is also saved and passed back 
-COUNT=$3      # iternation count of asgs-mon
-DELAY=$4      # number of seconds asgs-mon waits before checks 
-PROFILE=$5    # this is the ASGS profile name underwhich asgs-mon is running
-CONFIGFILE=$6 # config file associated with the $PROFILE 
-STATEFILE=$7  # path to the statefile associated with the $PROFILE
-VERBOSE=$8    # value of the "-v" flag passed t asgs-mon, so the plugin can use it if needed
+queue_output=""
+queue_rc=0
 
-OK=0
-WARNING=1
-CRITICAL=2
-UNKNOWN=3
-NOTIFY=4
-
-PROFILE=${CY}$PROFILE${R}
-
-# example of a plugin controlled delay, i.e.,
-# runs every 5 times
-if [[ $COUNT != 1 && $(($COUNT % 5)) != 0 ]]; then
-  PERIOD=$(($DELAY * 5))
-  echo -n $OLDOUT # to preserve in asgs-mon's cache for next time it's actually run
-  exit $OK
+# Prefer ASGS' scheduler-neutral helper explicitly. Do not call a random `sq`
+# from PATH (some systems ship an unrelated command with that name).
+if [[ -n "${SCRIPTDIR:-}" && -x "$SCRIPTDIR/bin/sq" ]]; then
+    queue_output=$("$SCRIPTDIR/bin/sq" 2>&1) || queue_rc=$?
+elif [[ "${QUEUESYS:-}" == "SLURM" ]] && mon_have squeue; then
+    queue_output=$(squeue -u "${USER:-$(id -un)}" --noheader -o " %.18i %.30j %T %.10M" 2>&1) || queue_rc=$?
+elif [[ "${QUEUESYS:-}" == "PBS" ]] && mon_have qstat; then
+    queue_output=$(qstat 2>&1 | grep "${USER:-$(id -un)}" || true)
+elif [[ "${QUEUESYS:-}" == "PBS" ]] && mon_have showq; then
+    queue_output=$(showq 2>&1 | grep "${USER:-$(id -un)}" || true)
+elif mon_have squeue; then
+    queue_output=$(squeue -u "${USER:-$(id -un)}" 2>&1) || queue_rc=$?
+else
+    mon_verbose "($HPCENVSHORT $COLORED_PROFILE - ${YW}$THIS${R}) no supported ASGS/scheduler queue command found; check skipped"
+    mon_ok "unsupported"
 fi
 
-SQ=$(sq 2>&1)
+if (( queue_rc != 0 )); then
+    mon_unknown "scheduler queue command failed" <<EOF
+$queue_output
+EOF
+fi
 
-# doesn't show on platforms where `sq` doesn't know the "squeue" type command 
-if [[ $VERBOSE == 1 && $(echo "$SQ" | grep -ic Guessing) == 0 ]]; then
-  printf "($HPCENVSHORT $PROFILE - ${GR}$THIS${R})\n$SQ\n" >&2
-fi 
+if [[ "$VERBOSE" == 1 && "$queue_output" != *Guessing* ]]; then
+    printf '(%s %s - %s%s%s)\n%s\n' \
+        "$HPCENVSHORT" "$COLORED_PROFILE" "$GR" "$THIS" "$R" "$queue_output" >&2
+fi
 
-echo -n $STATEFILEOK
-exit $OK
+if [[ -z "$queue_output" || "$queue_output" == No\ jobs\ in\ queue* ]]; then
+    running=0
+else
+    running=$(printf '%s\n' "$queue_output" | awk 'NF {n++} END {print n+0}')
+fi
+mon_ok "$running"

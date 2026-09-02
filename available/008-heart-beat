@@ -2,81 +2,43 @@
 #--------------------------------------------------------------------------
 # 008-heart-beat
 #--------------------------------------------------------------------------
-# Copyright(C) 2024 Brett Estrade
-# Copyright(C) 2024 Jason Fleming
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
 #
 # This file is part of the ADCIRC Surge Guidance System (ASGS).
-#
-# The ASGS is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# ASGS is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with the ASGS.  If not, see <http://www.gnu.org/licenses/>.
 #--------------------------------------------------------------------------
 
-THIS=$(basename -- $0)
+source "${ASGS_MON_LIB:-${ASGS_MON_PLUGINDIR}/_bash-helper-functions.sh}"
+mon_init "$@"
 
-source $ASGS_MON_PLUGINDIR/_bash-helper-functions.sh
 
-# standard parameters
-OLDOUT=$1     # asgs-mon saves the first line of STDOUT for each check, on the next run it gets passed back
-OLDEXIT=$2    # the previous exit code is also saved and passed back 
-COUNT=$3      # iternation count of asgs-mon
-DELAY=$4      # number of seconds asgs-mon waits before checks 
-PROFILE=$5    # this is the ASGS profile name underwhich asgs-mon is running
-CONFIGFILE=$6 # config file associated with the $PROFILE 
-STATEFILE=$7  # path to the statefile associated with the $PROFILE
-VERBOSE=$8    # value of the "-v" flag passed t asgs-mon, so the plugin can use it if needed
+now=$(date +%s)
+interval=10800
+next=""
 
-OK=0
-WARNING=1
-CRITICAL=2
-UNKNOWN=3
-NOTIFY=4
-
-COLORED_PROFILE=${CY}$PROFILE${R}
-
-NOW=$(date +%s)
-NEXTINC=10800 # 3hrs
-
-# set up NEXTCHECK on first run
-if [[ -z "$OLDOUT" ]]; then
-  # intialize
-  NEXTCHECK=$(($NOW+$NEXTINC))
-else
-  # need to get it from th previous STOUT line
-  NEXTCHECK=$(echo "$OLDOUT" | awk '{ print $8}')
+if [[ "${OLDOUT:-}" =~ next[[:space:]]check[[:space:]]at[[:space:]]([0-9]+) ]]; then
+    next=${BASH_REMATCH[1]}
+elif [[ "${OLDOUT:-}" =~ ^[0-9]+$ ]]; then
+    next=$OLDOUT
 fi
 
-DIFF=$(($NEXTCHECK-$NOW))
+if [[ -z "$next" ]]; then
+    next=$(( now + interval ))
+fi
 
-# don't run until $NEXTCHECK time is here
-if [[ $NOW -gt $NEXTCHECK ]]; then
-  NEXTCHECK=$(($NOW+$NEXTINC))
-  cat <<EOF
-(${HPCENVSHORT} ${COLORED_PROFILE} - ${YW}${THIS}${R}) next check at $NEXTCHECK ($DIFF seconds)
+if (( now >= next )); then
+    next=$(( now + interval ))
+    mon_notify "heartbeat; next check at $next" <<EOF
+This is a periodic heartbeat confirming that asgs-mon is still running.
 
-This is just a heartbeat message to say everything is okay.
-
-System  : $HPCENV
-ASGS    : $SCRIPTDIR
+System  : ${HPCENV:-}
+ASGS    : ${SCRIPTDIR:-}
 Profile : $PROFILE
-Config  : $ASGS_CONFIG
-ASGS PID: $ASGS_PID
-
-
+Config  : $CONFIGFILE
+ASGS PID: ${ASGS_PID:-}
 EOF
-  exit $NOTIFY
-fi 
+fi
 
-echo "(${HPCENVSHORT} ${COLORED_PROFILE} - ${GR}${THIS}${R}) next check at $NEXTCHECK ($DIFF seconds)" >&2
-echo -n "(${HPCENVSHORT} ${PROFILE} - ${THIS}) next check at $NEXTCHECK ($DIFF seconds)"
-
-exit $OK
+remaining=$(( next - now ))
+mon_verbose "($HPCENVSHORT $COLORED_PROFILE - ${GR}$THIS${R}) heartbeat next check at $next (${remaining}s)"
+mon_ok "$next"

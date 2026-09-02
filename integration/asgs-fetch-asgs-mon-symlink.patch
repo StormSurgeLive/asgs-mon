@@ -1,0 +1,10 @@
+diff --git a/bin/fetch b/bin/fetch
+--- a/bin/fetch
++++ b/bin/fetch
+@@ -112,6 +112,8 @@ case "${ITEM}" in
+       git clone ${BASEURL}StormSurgeLive/asgs-mon.git $SCRIPTDIR/git/asgs-mon
+     fi
+     popd > /dev/null 2>&1
++    # expose asgs-mon like the other first-class ASGS companion commands
++    ln -f -s $SCRIPTDIR/git/asgs-mon/bin/asgs-mon $SCRIPTDIR/bin/asgs-mon
+     ;;
