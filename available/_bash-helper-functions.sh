@@ -20,7 +20,16 @@ UNKNOWN=3
 NOTIFY=4
 
 # Colors are safe for terminals, cron, CI, redirected output, and TERM=dumb.
-BK= RD= GR= YW= BL= MG= CY= WH= R= B=
+BK=''
+RD=''
+GR=''
+YW=''
+BL=''
+MG=''
+CY=''
+WH=''
+R=''
+B=''
 if [[ -t 2 && -n "${TERM:-}" && "${TERM}" != "dumb" ]] && command -v tput >/dev/null 2>&1; then
     BK=$(tput setaf 0 2>/dev/null || true)
     RD=$(tput setaf 1 2>/dev/null || true)
