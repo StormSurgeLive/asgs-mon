@@ -1,5 +1,23 @@
 # Changes
 
+## 0.2.1 - 2026-09-03
+
+* Treats the loaded profile/`ASGS_CONFIG` as the durable monitored identity and
+  the `asgs_main.sh` PID as transient runtime state.
+* Matches the real `asgs_main.sh -c <canonical ASGS_CONFIG>` argv structure
+  instead of basename/substring config matches.
+* Revalidates `/proc` candidates and debounces transient Bash fork/subshell
+  duplicates before declaring multiple ASGS processes.
+* Removes surviving descendant candidates when another matching candidate is
+  their ancestor.
+* Allows the monitor to start/remain alive while ASGS is absent and
+  automatically reacquires a new PID after restart under the same profile.
+* Exports process lifecycle state through `ASGS_MON_PROCESS_*`, includes it in
+  status/adapter JSON, and clears stale `ASGS_PID` values while waiting.
+* `000-asgs_main-pid-check` now reports waiting/ambiguity/restart lifecycle
+  state supplied by the supervisor; restart recovery is an immediate NOTICE.
+* Added process discovery/debounce and restart/reacquisition regression tests.
+
 ## 0.2.0 - 2026-09-01
 
 * Hardened process detection around the loaded `ASGS_CONFIG`; ambiguous matches

@@ -22,22 +22,24 @@ use feature qw/say/;
 
 use Dispatch::Fu     qw/dispatch on xdefault/;
 use Fcntl            qw/:flock/;
+use Cwd              qw/abs_path/;
 use File::Basename   qw/basename/;
 use File::Spec       ();
 use FindBin          qw/$Bin/;
 use JSON::PP         qw/encode_json decode_json/;
 use POSIX            qw/setsid WNOHANG/;
 use Term::ANSIColor  qw/:constants colorstrip/;
-use Time::HiRes      qw/gettimeofday tv_interval/;
+use Time::HiRes      qw/gettimeofday tv_interval usleep/;
 use Util::H2O::More  qw/Getopt2h2o h2o ini2h2o/;
 
-our $VERSION = q{0.2.0};
+our $VERSION = q{0.2.1};
 
 use constant {
     DEFAULT_DELAY          => 10,
     DEFAULT_TIMEOUT        => 30,
     DEFAULT_ADAPTER_TIMEOUT=> 5,
     DEFAULT_HUSH           => 1800,
+    DEFAULT_DISCOVERY_SETTLE_MS => 100,
 
     EXIT_SUCCESS => 0,
     EXIT_ERROR   => 1,
@@ -165,7 +167,7 @@ Operator options:
   --delay SECONDS       Seconds between passes (default: @{[DEFAULT_DELAY]})
   --timeout SECONDS     Maximum runtime of one check (default: @{[DEFAULT_TIMEOUT]})
   --hush SECONDS        Minimum repeat-notification interval (default: @{[DEFAULT_HUSH]})
-  --pid PID             Monitor this PID after validating it belongs to ASGS_CONFIG
+  --pid PID             Validate/use this PID initially; then follow ASGS_CONFIG
   --silent, -s          Suppress routine plugin status output
   -v                    Verbose plugin status output (default)
   --trace               Print each check immediately before it runs
@@ -452,10 +454,14 @@ sub build_context {
         hpcenvshort   => $hpcshort,
         instancefile  => (defined $rundir ? File::Spec->catfile($rundir, q{status}, q{asgs.instance.status.json}) : undef),
         hookfile      => (defined $rundir ? File::Spec->catfile($rundir, q{status}, q{hook.status.json}) : undef),
-        pid           => undef,
-        heartbeat     => undef,
-        statusfile    => undef,
-        lockfile      => undef,
+        pid                => undef,
+        previous_pid       => undef,
+        process_state      => q{waiting},
+        process_candidates => q{},
+        process_changed    => 0,
+        heartbeat          => undef,
+        statusfile         => undef,
+        lockfile           => undef,
     };
 
     return $ctx;
@@ -485,6 +491,10 @@ sub export_context {
         ASGS_MON_INSTANCEFILE => $ctx->instancefile,
         ASGS_MON_HOOKFILE     => $ctx->hookfile,
         ASGS_MON_PID          => $ctx->pid,
+        ASGS_MON_PREVIOUS_PID => $ctx->previous_pid,
+        ASGS_MON_PROCESS_STATE=> $ctx->process_state,
+        ASGS_MON_PROCESS_CANDIDATES => $ctx->process_candidates,
+        ASGS_MON_PROCESS_CHANGED => ($ctx->process_changed ? 1 : 0),
         ASGS_MON_COUNT        => $count,
         ASGS_MON_DELAY        => $opts->delay,
         ASGS_MON_VERBOSE      => ($opts->v ? 1 : 0),
@@ -506,7 +516,13 @@ sub export_context {
     }
 
     # Preserve the original plugin environment while keeping dynamic state fresh.
-    $ENV{ASGS_PID} = $ctx->pid if defined $ctx->pid;
+    # Never leave a stale ASGS_PID behind while the monitored process is absent.
+    if (defined $ctx->pid) {
+        $ENV{ASGS_PID} = $ctx->pid;
+    }
+    else {
+        delete $ENV{ASGS_PID};
+    }
     for my $pair (
         [RUNDIR     => $ctx->rundir],
         [SYSLOG     => $ctx->syslog],
@@ -535,27 +551,66 @@ sub proc_cmdline {
     return \@args;
 }
 
+sub canonical_path {
+    my ($path, $base) = @_;
+    return undef if not defined $path or $path eq q{};
+
+    my $abs = File::Spec->file_name_is_absolute($path)
+        ? $path
+        : File::Spec->rel2abs($path, defined($base) ? $base : File::Spec->curdir);
+
+    my $real = eval { abs_path($abs) };
+    return defined($real) ? $real : File::Spec->canonpath($abs);
+}
+
+sub proc_cwd {
+    my ($pid) = @_;
+    return undef if not defined $pid or $pid !~ /\A\d+\z/;
+    my $cwd = readlink "/proc/$pid/cwd";
+    return defined($cwd) && $cwd ne q{} ? $cwd : undef;
+}
+
+sub proc_ppid {
+    my ($pid) = @_;
+    return undef if not defined $pid or $pid !~ /\A\d+\z/;
+    open my $fh, q{<}, "/proc/$pid/stat" or return undef;
+    my $line = <$fh>;
+    close $fh;
+    return undef if not defined $line;
+    return $1 if $line =~ /\A\d+\s+\(.*\)\s+\S+\s+(\d+)\s/;
+    return undef;
+}
+
 sub pid_matches_config {
     my ($pid, $config) = @_;
     my $args = proc_cmdline($pid);
     return 0 if not $args or not @$args;
 
-    my $has_asgs = grep { /(?:^|\/)asgs_main\.sh\z/ } @$args;
-    return 0 if not $has_asgs;
+    my $script_index;
+    for my $i (0 .. $#$args) {
+        if (basename($args->[$i]) eq q{asgs_main.sh}) {
+            $script_index = $i;
+            last;
+        }
+    }
+    return 0 if not defined $script_index;
 
-    my $full = File::Spec->rel2abs($config);
-    my $base = basename($config);
-    my $has_config = grep {
-        $_ eq $config
-        || $_ eq $full
-        || $_ eq $base
-        || basename($_) eq $base
-        || index($_, $base) >= 0
-    } @$args;
-    return $has_config ? 1 : 0;
+    my $config_arg;
+    for (my $i = $script_index + 1; $i < $#$args; ++$i) {
+        if ($args->[$i] eq q{-c}) {
+            $config_arg = $args->[$i + 1];
+            last;
+        }
+    }
+    return 0 if not defined $config_arg or $config_arg eq q{};
+
+    my $expected = canonical_path($config);
+    my $actual   = canonical_path($config_arg, proc_cwd($pid));
+    return 0 if not defined $expected or not defined $actual;
+    return $actual eq $expected ? 1 : 0;
 }
 
-sub find_asgs_pids {
+sub scan_asgs_pids {
     my ($config) = @_;
     my @pids;
     if (opendir my $dh, q{/proc}) {
@@ -568,20 +623,118 @@ sub find_asgs_pids {
     return sort { $a <=> $b } @pids;
 }
 
-sub select_asgs_pid {
-    my ($opts, $config) = @_;
-    if (defined $opts->pid) {
-        die "FATAL: --pid " . $opts->pid . " is not an asgs_main.sh process for '$config'\n"
-            if not pid_matches_config($opts->pid, $config);
-        return $opts->pid;
+sub remove_descendant_candidates {
+    my (@pids) = @_;
+    return @pids if @pids < 2;
+
+    my %candidate = map { $_ => 1 } @pids;
+    my %drop;
+    for my $pid (@pids) {
+        my $ancestor = proc_ppid($pid);
+        my %seen;
+        my $depth = 0;
+        while (defined($ancestor) && $ancestor > 1 && !$seen{$ancestor}++ && ++$depth <= 128) {
+            if ($candidate{$ancestor}) {
+                $drop{$pid} = 1;
+                last;
+            }
+            $ancestor = proc_ppid($ancestor);
+        }
+    }
+    return grep { not $drop{$_} } @pids;
+}
+
+sub find_asgs_pids {
+    my ($config) = @_;
+
+    # /proc is not an atomic snapshot. Bash can briefly expose forked/subshell
+    # processes with the same argv as asgs_main.sh. Revalidate after the scan,
+    # and if more than one candidate remains, allow the transient process a
+    # short interval to disappear before declaring the profile ambiguous.
+    my @pids = scan_asgs_pids($config);
+    @pids = grep { pid_matches_config($_, $config) } @pids;
+
+    if (@pids > 1) {
+        my $settle_ms = DEFAULT_DISCOVERY_SETTLE_MS;
+        if (defined $ENV{ASGS_MON_DISCOVERY_SETTLE_MS}
+            && $ENV{ASGS_MON_DISCOVERY_SETTLE_MS} =~ /\A\d+\z/)
+        {
+            $settle_ms = 0 + $ENV{ASGS_MON_DISCOVERY_SETTLE_MS};
+        }
+        usleep($settle_ms * 1000) if $settle_ms > 0;
+        @pids = grep { pid_matches_config($_, $config) } @pids;
     }
 
+    @pids = remove_descendant_candidates(@pids);
+    @pids = grep { pid_matches_config($_, $config) } @pids;
+    return sort { $a <=> $b } @pids;
+}
+
+sub discover_asgs_process {
+    my ($config) = @_;
     my @pids = find_asgs_pids($config);
-    die "FATAL: can't find a running asgs_main.sh for '$config'; start the profile or use --pid PID\n"
-        if not @pids;
-    die "FATAL: multiple asgs_main.sh processes match '$config': @pids; select one with --pid PID\n"
-        if @pids > 1;
-    return $pids[0];
+    return {
+        state      => @pids == 1 ? q{running} : @pids ? q{ambiguous} : q{waiting},
+        pid        => @pids == 1 ? $pids[0] : undef,
+        candidates => \@pids,
+    };
+}
+
+sub refresh_asgs_process {
+    my ($ctx, $opts, %args) = @_;
+    my $old_state = $ctx->process_state // q{waiting};
+    my $old_pid   = $ctx->pid;
+    my $old_candidates = $ctx->process_candidates // q{};
+
+    my $found;
+    if ($args{initial} && defined $opts->pid) {
+        die "FATAL: --pid " . $opts->pid . " is not an asgs_main.sh -c process for '" . $ctx->config . "'\n"
+            if not pid_matches_config($opts->pid, $ctx->config);
+        $found = { state => q{running}, pid => 0 + $opts->pid, candidates => [0 + $opts->pid] };
+    }
+    else {
+        $found = discover_asgs_process($ctx->config);
+    }
+
+    $ctx->process_changed(0);
+    $ctx->process_state($found->{state});
+    $ctx->process_candidates(join q{ }, @{ $found->{candidates} });
+
+    if ($found->{state} eq q{running}) {
+        my $new_pid = $found->{pid};
+        my $previous = defined($old_pid) ? $old_pid : $ctx->previous_pid;
+        if (defined($previous) && $previous != $new_pid) {
+            $ctx->previous_pid($previous);
+            $ctx->process_changed(1);
+        }
+        $ctx->pid($new_pid);
+    }
+    else {
+        $ctx->previous_pid($old_pid) if defined $old_pid;
+        $ctx->pid(undef);
+    }
+
+    if ($args{announce}) {
+        my $new_state = $ctx->process_state;
+        if ($new_state eq q{running}) {
+            if ($ctx->process_changed) {
+                say STDERR "ASGS process reacquired: pid " . ($ctx->previous_pid // q{?}) . " -> " . $ctx->pid;
+            }
+            elsif ($old_state ne q{running}) {
+                say STDERR "ASGS process discovered: pid " . $ctx->pid;
+            }
+        }
+        elsif ($new_state eq q{waiting} && $old_state ne q{waiting}) {
+            say STDERR "ASGS process is not running; waiting for restart under this profile ...";
+        }
+        elsif ($new_state eq q{ambiguous}
+            && ($old_state ne q{ambiguous} || $old_candidates ne ($ctx->process_candidates // q{})))
+        {
+            say STDERR "ASGS process discovery is ambiguous; stable matching PIDs: " . ($ctx->process_candidates // q{});
+        }
+    }
+
+    return $found;
 }
 
 sub runtime_paths {
@@ -660,7 +813,7 @@ sub acquire_context {
     require_asgs_context($opts, %args);
     my $ctx = build_context($opts);
     if (defined $ctx->config and -f $ctx->config) {
-        $ctx->config(File::Spec->rel2abs($ctx->config));
+        $ctx->config(canonical_path($ctx->config));
         $ENV{ASGS_CONFIG} = $ctx->config;
     }
     my ($lock, $heartbeat, $statusfile) = runtime_paths($ctx);
@@ -673,8 +826,8 @@ sub acquire_context {
 sub run_monitor {
     my ($opts) = @_;
     my $ctx = acquire_context($opts);
-    $ctx->pid(select_asgs_pid($opts, $ctx->config));
     acquire_instance_lock($ctx);
+    refresh_asgs_process($ctx, $opts, initial => 1);
     my $notify = load_notify_config($opts, 0);
     if ($notify->enabled && not command_in_path(q{asgs-sendmail})) {
         die "FATAL: asgs-sendmail is not present in PATH; install/fix ASGS mail support or use --no-notify\n";
@@ -683,7 +836,15 @@ sub run_monitor {
     say STDERR "asgs-mon $VERSION starting ...";
     say STDERR "- profile: " . ($ctx->profile // q{NONE});
     say STDERR "- config : " . ($ctx->config // q{NONE});
-    say STDERR "- asgs pid: " . ($ctx->pid // q{NONE});
+    if ($ctx->process_state eq q{running}) {
+        say STDERR "- asgs pid: " . $ctx->pid;
+    }
+    elsif ($ctx->process_state eq q{ambiguous}) {
+        say STDERR "- asgs pid: ambiguous (" . ($ctx->process_candidates // q{}) . q{)};
+    }
+    else {
+        say STDERR "- asgs pid: waiting for matching process";
+    }
     say STDERR "- checks every " . $opts->delay . " seconds; per-check timeout " . $opts->timeout . " seconds";
     say STDERR "- repeat notifications limited to every " . $notify->hush . " seconds"
         if $notify->enabled;
@@ -702,6 +863,11 @@ sub run_monitor {
             my $value = eval { $fresh->$field };
             $ctx->$field($value) if defined $value;
         }
+
+        # The profile/ASGS_CONFIG is the durable identity. The PID is transient:
+        # rediscover it on every pass so an ASGS restart does not require the
+        # monitor itself to be restarted.
+        refresh_asgs_process($ctx, $opts, announce => ($count > 1));
         export_context($ctx, $count, $opts);
 
         my @plugins = active_checks();
@@ -730,7 +896,7 @@ sub run_one_check {
     require_asgs_context($opts);
     my $name = resolve_available_check($opts->check);
     my $ctx = acquire_context($opts);
-    $ctx->pid(select_asgs_pid($opts, $ctx->config));
+    refresh_asgs_process($ctx, $opts, initial => 1);
     export_context($ctx, 1, $opts);
 
     my $notify = h2o { enabled => 0, email => undef, config => undef, hush => DEFAULT_HUSH };
@@ -833,9 +999,11 @@ sub present_result {
         my $last_alert = $CACHE{$plugin}->{alerted_at};
         my $severity_escalated = defined($oldret) && severity_rank($retcode) > severity_rank($oldret);
         my $transition = (!defined($oldret) || $oldret == OK);
+        my $status_transition = defined($oldret) && $oldret != $retcode;
 
         my $due = !defined($last_alert)
                || $transition
+               || $status_transition
                || $severity_escalated
                || $now >= ($last_alert + $notify->hush);
 
@@ -1006,6 +1174,9 @@ sub build_event {
         profile      => $ctx->profile,
         config       => $ctx->config,
         asgs_pid     => 0 + ($ctx->pid // 0),
+        asgs_previous_pid => 0 + ($ctx->previous_pid // 0),
+        asgs_process_state => $ctx->process_state,
+        asgs_process_candidates => $ctx->process_candidates,
         monitor_pid  => 0 + $$,
         rundir       => $ctx->rundir,
         advisory     => $ctx->advisory,
@@ -1079,6 +1250,9 @@ sub write_runtime_snapshot {
         epoch       => time,
         monitor_pid => 0 + $$,
         asgs_pid    => 0 + ($ctx->pid // 0),
+        asgs_previous_pid => 0 + ($ctx->previous_pid // 0),
+        asgs_process_state => $ctx->process_state,
+        asgs_process_candidates => $ctx->process_candidates,
         profile     => $ctx->profile,
         hpcenv      => $ctx->hpcenv,
         hpcenvshort => $ctx->hpcenvshort,
@@ -1097,6 +1271,7 @@ sub write_runtime_snapshot {
         epoch       => time,
         monitor_pid => 0 + $$,
         asgs_pid    => 0 + ($ctx->pid // 0),
+        asgs_process_state => $ctx->process_state,
         profile     => $ctx->profile,
         config      => $ctx->config,
     });
@@ -1143,7 +1318,10 @@ sub show_status {
     say "ASGS monitor status";
     say "  profile     : " . ($data->{profile} // q{});
     say "  platform    : " . ($data->{hpcenvshort} // $data->{hpcenv} // q{});
-    say "  ASGS PID    : " . ($data->{asgs_pid} // q{});
+    say "  ASGS state  : " . ($data->{asgs_process_state} // q{unknown});
+    say "  ASGS PID    : " . (($data->{asgs_pid} // 0) ? $data->{asgs_pid} : q{none});
+    say "  candidates  : " . ($data->{asgs_process_candidates} // q{})
+        if ($data->{asgs_process_state} // q{}) eq q{ambiguous};
     say "  monitor PID : " . ($data->{monitor_pid} // q{});
     say "  advisory    : " . ($data->{advisory} // q{});
     say "  RUNDIR      : " . ($data->{rundir} // q{});
@@ -1190,9 +1368,11 @@ sub validate_environment {
     }
 
     if (defined $ENV{ASGS_CONFIG} && -r $ENV{ASGS_CONFIG}) {
-        my @pids = find_asgs_pids(File::Spec->rel2abs($ENV{ASGS_CONFIG}));
-        push @warnings, "no matching asgs_main.sh process is currently running" if not @pids;
-        push @problems, "multiple matching asgs_main.sh processes: @pids" if @pids > 1;
+        my $process = discover_asgs_process(canonical_path($ENV{ASGS_CONFIG}));
+        push @warnings, "no matching asgs_main.sh -c process is currently running; monitor would wait"
+            if $process->{state} eq q{waiting};
+        push @problems, "multiple stable matching asgs_main.sh -c processes: " . join(q{ }, @{ $process->{candidates} })
+            if $process->{state} eq q{ambiguous};
     }
 
     my $notify = load_notify_config($opts, 1);

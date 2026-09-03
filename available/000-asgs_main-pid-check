@@ -11,33 +11,59 @@
 source "${ASGS_MON_LIB:-${ASGS_MON_PLUGINDIR}/_bash-helper-functions.sh}"
 mon_init "$@"
 
-
-mon_require_var ASGS_PID
-
-if [[ ! "$ASGS_PID" =~ ^[0-9]+$ || ! -r "/proc/$ASGS_PID/cmdline" ]]; then
-    mon_critical "asgs_main.sh went away" <<EOF
-Suggested Remedy:
-Log into ${HPCENV:-the ASGS host} and inspect ${SCRIPTDIR:-the ASGS installation}.
-
-Information:
-The configured ASGS process ID $ASGS_PID no longer exists.
+case "${PROCESS_STATE:-waiting}" in
+    waiting)
+        mon_critical "asgs_main.sh is not running" <<EOF
+The monitor is still attached to this ASGS profile and will automatically
+reacquire asgs_main.sh when it is restarted with the same ASGS_CONFIG.
 
 Profile: $PROFILE
 Config : $CONFIGFILE
 EOF
-fi
+        ;;
 
-cmdline=$(tr '\0' ' ' < "/proc/$ASGS_PID/cmdline" 2>/dev/null || true)
-config_base=$(basename -- "$CONFIGFILE")
-if [[ "$cmdline" != *asgs_main.sh* || "$cmdline" != *"$config_base"* ]]; then
-    mon_critical "ASGS PID no longer matches this profile" <<EOF
-PID $ASGS_PID exists, but its command line no longer identifies the expected
-asgs_main.sh instance.
+    ambiguous)
+        mon_critical "multiple stable asgs_main.sh processes match this profile" <<EOF
+The monitor found more than one stable process whose argv identifies:
 
-Expected config: $CONFIGFILE
-Command line   : $cmdline
+  asgs_main.sh -c $CONFIGFILE
+
+Matching PIDs: ${PROCESS_CANDIDATES:-unknown}
+
+The monitor will keep retrying and will attach automatically when exactly one
+stable matching process remains.
 EOF
-fi
+        ;;
 
-mon_verbose "($HPCENVSHORT $COLORED_PROFILE - ${GR}$THIS${R}) Found asgs_main.sh (pid $ASGS_PID)"
-mon_ok "pid=$ASGS_PID"
+    running)
+        mon_require_var ASGS_PID
+        if [[ ! "$ASGS_PID" =~ ^[0-9]+$ || ! -r "/proc/$ASGS_PID/cmdline" ]]; then
+            mon_unknown "ASGS process disappeared after discovery" <<EOF
+PID $ASGS_PID was validated by the supervisor but disappeared before this check
+ran. The next monitor pass will rediscover the process for this profile.
+EOF
+        fi
+
+        if [[ "${PROCESS_CHANGED:-0}" == 1 \
+              && "${PREVIOUS_ASGS_PID:-}" =~ ^[0-9]+$ \
+              && "$PREVIOUS_ASGS_PID" != "$ASGS_PID" ]]; then
+            mon_notify "ASGS process restarted" <<EOF
+asgs-mon automatically reacquired the ASGS process for this profile.
+
+Profile     : $PROFILE
+Config      : $CONFIGFILE
+Previous PID: $PREVIOUS_ASGS_PID
+Current PID : $ASGS_PID
+EOF
+        fi
+
+        mon_verbose "($HPCENVSHORT $COLORED_PROFILE - ${GR}$THIS${R}) Found asgs_main.sh (pid $ASGS_PID)"
+        mon_ok "pid=$ASGS_PID"
+        ;;
+
+    *)
+        mon_unknown "invalid ASGS process state '${PROCESS_STATE:-}'" <<EOF
+The supervisor exported an unsupported ASGS process state.
+EOF
+        ;;
+esac

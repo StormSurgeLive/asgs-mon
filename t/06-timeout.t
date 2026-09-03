@@ -45,7 +45,7 @@ die "fork failed" if not defined $asgs_pid;
 if ($asgs_pid == 0) {
     open STDOUT, q{>}, q{/dev/null};
     open STDERR, q{>}, q{/dev/null};
-    exec q{bash}, $fake, $config;
+    exec q{bash}, $fake, q{-c}, $config;
     exit 127;
 }
 sleep 1;

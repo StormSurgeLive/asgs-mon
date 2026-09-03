@@ -79,9 +79,10 @@ load profile TXLA22a_GFS_queenbeec_be
 asgs-mon
 ```
 
-The monitor discovers the single `asgs_main.sh` whose command line matches
-the loaded `ASGS_CONFIG`. If more than one process matches, it refuses to
-guess; use `--pid PID` to select one explicitly.
+The monitor follows the loaded profile rather than permanently following one
+PID. `ASGS_CONFIG` is the durable instance identity. The supervisor discovers
+the stable `asgs_main.sh -c <ASGS_CONFIG>` process, waits if it is temporarily
+absent, and automatically adopts the new PID when the same profile is restarted.
 
 ## Command line
 
@@ -103,7 +104,7 @@ Important options:
 | `--delay SECONDS` | seconds between passes, default 10 |
 | `--timeout SECONDS` | maximum runtime for one check, default 30 |
 | `--hush SECONDS` | minimum repeat-notification interval, default 1800 |
-| `--pid PID` | explicitly select and validate an ASGS process |
+| `--pid PID` | validate/use this PID initially; normal monitoring then continues to follow the profile |
 | `--silent`, `-s` | suppress routine check status |
 | `-v` | verbose operator output, default |
 | `--trace` | print each check before execution |
@@ -205,21 +206,33 @@ because the process remains down.
 
 The monitor does not use `ps | grep | awk` command strings.
 
-On Linux it inspects `/proc/PID/cmdline` and requires:
+On Linux it inspects `/proc/PID/cmdline` and structurally matches the actual
+ASGS invocation:
 
-1. the process command line to contain `asgs_main.sh`; and
-2. the process command line to identify the loaded `ASGS_CONFIG`.
+```text
+asgs_main.sh -c <canonical ASGS_CONFIG>
+```
 
-If zero processes match, startup fails. If multiple processes match, startup
-fails instead of silently selecting the lowest PID. `--pid` still exists, but
-the supplied PID is validated against the same criteria.
+The config argument is compared as a canonical path rather than by basename or
+substring. Because `/proc` is not an atomic snapshot and Bash can briefly expose
+forked/subshell processes with the same argv, discovery revalidates candidates,
+allows a short settling interval when multiple candidates are seen, and removes
+descendants of another surviving candidate before declaring ambiguity.
+
+`ASGS_CONFIG` is the persistent identity; the PID is transient. If no process is
+running, `asgs-mon` remains alive in a waiting state. When ASGS is restarted from
+a separate `asgsh` using the same profile/config, the monitor automatically
+reacquires the new PID. A genuine set of multiple stable root candidates is
+reported as ambiguous and retried rather than guessed.
+
+`--pid` is an initial validated selection, useful for diagnostics; after startup
+the normal monitor still follows the profile so it can survive a later restart.
 
 A per-profile file lock prevents accidentally running two monitor supervisors
 for the same ASGS configuration.
 
-The monitor deliberately stays attached to the PID selected at startup. If ASGS
-is stopped and restarted with a new PID, restart `asgs-mon` as well; it will not
-silently reattach to a different process.
+If ASGS is stopped and restarted with a new PID, `asgs-mon` remains attached to
+the profile and follows the replacement process automatically.
 
 ## Check execution hardening
 
