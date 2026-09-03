@@ -9,8 +9,13 @@ Prefer the command line:
   asgs-mon --enable 003
   asgs-mon --disable 003
   asgs-mon --check 003
+  asgs-mon --check atcf
 
-The numeric prefix controls execution/display order.
+Numeric prefixes control execution/display order. Descriptive checks without a
+numeric prefix are also supported and sort after numbered checks.
+
+`atcf-sanity` is intentionally disabled by default. Enable it after validating
+it against the target TC profile with `asgs-mon --check atcf`.
 
 New Bash checks should source _bash-helper-functions.sh and call mon_init "$@".
 See ../examples/check-template.bash and the main README.md.

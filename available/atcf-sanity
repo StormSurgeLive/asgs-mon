@@ -1,0 +1,137 @@
+#!/usr/bin/env perl
+#--------------------------------------------------------------------------
+# atcf-sanity - read-only ATCF / tropical-cyclone timeline sanity check
+#--------------------------------------------------------------------------
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
+#
+# This file is part of the ADCIRC Surge Guidance System (ASGS).
+#--------------------------------------------------------------------------
+
+use v5.12;
+use strict;
+use warnings;
+
+use FindBin qw/$Bin/;
+use lib "$Bin/../lib";
+use JSON::PP ();
+use ASGS::Mon::ATCF qw/run_sanity_check/;
+
+# The ASGS ATCF poll interval is ordinarily about a minute. Avoid adding a new
+# remote request on every 10-second monitor pass. A one-shot --check always
+# executes because its pass count is 1. On deferred passes preserve the prior
+# first-line status/exit code; the supervisor preserves prior structured details.
+my $count = $ENV{ASGS_MON_COUNT} // 1;
+my $delay = $ENV{ASGS_MON_DELAY} // 10;
+my $interval = $ENV{ASGS_MON_ATCF_INTERVAL} // 60;
+if ($count =~ /^\d+$/ && $delay =~ /^\d+$/ && $delay > 0
+    && $interval =~ /^\d+$/ && $interval > 0 && $count > 1) {
+    my $stride = int(($interval + $delay - 1) / $delay);
+    $stride = 1 if $stride < 1;
+    if ((($count - 1) % $stride) != 0) {
+        my $oldout = $ENV{ASGS_MON_OLDOUT} // q{};
+        my $oldexit = $ENV{ASGS_MON_OLDEXIT};
+        if ($oldout ne q{} && defined($oldexit) && $oldexit =~ /^[0-4]$/) {
+            print "$oldout\n";
+            exit(0 + $oldexit);
+        }
+    }
+}
+
+my $result = eval { run_sanity_check() };
+if (!$result) {
+    my $err = $@ || q{unknown ATCF sanity-check failure};
+    $err =~ s/\s+$//;
+    my $host = $ENV{ASGS_MON_HPCENVSHORT} || $ENV{HPCENVSHORT} || q{unknown};
+    my $profile = $ENV{ASGS_MON_PROFILE} || q{unknown-profile};
+    print "($host $profile - atcf-sanity) UNKNOWN ATCF sanity check could not complete\n\n$err\n";
+    exit 3;
+}
+
+if (defined $ENV{ASGS_MON_RESULT_FILE} && $ENV{ASGS_MON_RESULT_FILE} ne q{}) {
+    if (open my $rfh, q{>}, $ENV{ASGS_MON_RESULT_FILE}) {
+        print {$rfh} JSON::PP->new->canonical->pretty->encode($result);
+        close $rfh;
+    }
+}
+
+my $host = $ENV{ASGS_MON_HPCENVSHORT} || $ENV{HPCENVSHORT} || q{unknown};
+my $profile = $ENV{ASGS_MON_PROFILE} || q{unknown-profile};
+my $status = $result->{status} || q{UNKNOWN};
+my $summary = $result->{summary} || q{ATCF sanity check completed};
+print "($host $profile - atcf-sanity) $status $summary\n\n";
+
+if (!$result->{applicable}) {
+    print "ATCF\n  not applicable: TROPICALCYCLONE is not on\n";
+    exit 0;
+}
+
+my $source = $result->{source} || {};
+my $cfg = $result->{config} || {};
+my $asgs = $result->{asgs} || {};
+my $hot = $result->{hotstart} || {};
+
+print "ATCF\n";
+printf "  adapter:           %s\n", defined($cfg->{adapter}) ? $cfg->{adapter} : q{unknown};
+printf "  source:            %s\n", defined($cfg->{rsssite}) ? $cfg->{rsssite} : q{unknown};
+printf "  storm:             %s%s%s\n",
+    defined($source->{basin}) ? $source->{basin} : q{AL},
+    defined($source->{storm}) ? $source->{storm} : ($cfg->{storm} // q{??}),
+    defined($source->{year}) ? $source->{year} : ($cfg->{year} // q{????});
+printf "  storm name:        %s\n", $source->{name} // q{unknown};
+printf "  advisory:          %s\n", $source->{product_advisory} // $source->{adapter_advisory} // q{unknown};
+if (defined($source->{product_advisory}) && defined($source->{adapter_advisory})
+    && $source->{product_advisory} ne $source->{adapter_advisory}) {
+    printf "  adapter advisory:  %s\n", $source->{adapter_advisory};
+}
+printf "  advisory time:     %s\n", $source->{model_time} // q{unknown};
+printf "  forecast through:  %s\n", $source->{forecast_end_time} // q{unknown};
+printf "  forecast length:   %s\n",
+    defined($source->{forecast_hours}) ? sprintf(q{%.3f h}, $source->{forecast_hours}) : q{unknown};
+
+print "\nASGS\n";
+printf "  state advisory:    %s\n", $asgs->{advisory} // q{unknown};
+printf "  cycle:             %s\n", $asgs->{cycle} // q{unknown};
+printf "  cold start:        %s\n", $asgs->{cold_start} // q{unknown};
+printf "  hindcast length:   %s\n",
+    defined($asgs->{hindcast_days}) ? "$asgs->{hindcast_days} d" : q{unknown};
+printf "  run directory:     %s\n", $asgs->{rundir} // q{unknown};
+
+print "\nADCIRC\n";
+printf "  hotstart:          %s\n", $hot->{path} // q{not identified};
+printf "  hotstart HSTIME:   %s\n",
+    defined($hot->{hstime_seconds}) ? sprintf(q{%.3f s (%s)}, $hot->{hstime_seconds}, $hot->{hstime_source} // q{unknown source}) : q{unknown};
+printf "  hotstart model:    %s\n", $hot->{model_time} // q{unknown};
+if (defined $hot->{producer_cold_start}) {
+    printf "  producer coldstart:%s\n", " $hot->{producer_cold_start}";
+}
+
+my $scenarios = $result->{scenarios} || [];
+if (@$scenarios) {
+    print "\nScenario clocks\n";
+    for my $s (@$scenarios) {
+        printf "  %-20s start=%s end=%s",
+            $s->{scenario} // q{scenario}, $s->{run_start} // q{?}, $s->{run_end} // q{?};
+        printf " remaining=%.3fs", $s->{adcirc_remaining_seconds}
+            if defined $s->{adcirc_remaining_seconds};
+        printf " rnday=%s", $s->{rnday} if defined $s->{rnday};
+        printf " dt=%s", $s->{dt} if defined $s->{dt};
+        print "\n";
+    }
+}
+
+print "\nAssessment\n";
+my $issues = $result->{issues} || [];
+if (@$issues) {
+    for my $i (@$issues) {
+        printf "  %-8s %-31s %s\n", $i->{severity} // q{?}, $i->{id} // q{issue}, $i->{message} // q{};
+    }
+}
+else {
+    print "  PASS     relative ATCF/model timeline      no demonstrated inconsistency\n";
+}
+for my $note (@{ $result->{notes} || [] }) {
+    print "  INFO     $note\n";
+}
+
+exit($result->{status_code} // 3);

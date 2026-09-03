@@ -170,6 +170,77 @@ which protects locally-created/custom checks.
 
 Additional checks remain available but disabled by default.
 
+## ATCF / tropical-cyclone sanity check
+
+Version 0.2.2 includes a conservative, read-only ATCF timeline diagnostic. It
+is available but **disabled by default** until it has been exercised across
+more operational profiles.
+
+Run it directly:
+
+```bash
+asgs-mon --check atcf
+```
+
+Enable it in the normal monitor:
+
+```bash
+asgs-mon --enable atcf
+```
+
+When `TROPICALCYCLONE` is not `on`, the check returns OK/not-applicable. For a
+TC run it correlates three clocks:
+
+```text
+ATCF source/advisory clock
+        -> ASGS scenario clock
+        -> ADCIRC hotstart/model clock
+```
+
+The check uses the configured `GET_ATCF_SCRIPT`, `STORM`, `YEAR`, `TRIGGER`,
+`RSSSITE`, `FTPSITE`, `FDIR`, and `HDIR`. Known ASGS adapters
+`get_atcf.pl` and `get_atcf_http.pl` are invoked only in a private temporary
+directory. If RSS processing requires `nhc_advisory_bot.pl`, that conversion is
+also performed only in the sandbox. Nothing is downloaded into the active
+`RUNDIR`, state is never advanced, and no replay-control action is invoked.
+Unknown custom adapters are reported as UNKNOWN rather than executed blindly.
+The remote probe runs approximately once per 60 seconds during normal monitoring
+(`ASGS_MON_ATCF_INTERVAL` may override this); `asgs-mon --check atcf` always
+performs a fresh probe. Local status remains available between probe passes.
+
+The diagnostic inspects current ASGS state plus available `run.properties` and
+`*.run-control.properties`. When a reused hotstart can be identified through
+`LASTSUBDIR`, it reads `HSTIME` with the ADCIRC `hstime` utility when available
+(or uses the current ASGS state value) and computes the corresponding ADCIRC
+model time from `COLDSTARTDATE`.
+
+High-confidence CRITICAL conditions include:
+
+* configured/source storm identity mismatch or an unusable ATCF source;
+* ATCF forecast end at or before the advisory/model start;
+* scenario `RunEndTime` at or before `RunStartTime`;
+* remaining ADCIRC integration time below one minute or at/below `2*dt`;
+* a reused hotstart whose ADCIRC model clock is already ahead of the current
+  ATCF advisory/model clock.
+
+A hotstart produced under a different `ColdStartTime` is a WARNING. Intermediate
+advisories are retained as distinct product identifiers (`002`, `002A`, etc.).
+If the configured ASGS adapter reports only the numeric portion, the check
+reports that precision limitation but does not invent equality or failure.
+
+There is intentionally **no wall-clock freshness failure test**. A replay may
+rebase all timestamps by one constant offset. The important invariants are
+relative: forecast end must follow advisory/model time, scenario end must follow
+scenario start, and the ADCIRC hotstart clock must be coherent with the current
+advisory timeline.
+The check also keeps a tiny monitor-owned observation history outside the active
+`RUNDIR`. For a distinct next advisory, model time must move forward. The
+history key includes `COLDSTARTDATE`, so a deliberate replay cycle rebase with
+a new cold-start epoch starts a new comparison sequence.
+
+The full structured ATCF assessment is attached to the normal status/adapter
+JSON under the check's `details` object.
+
 ## Notification limiting
 
 The old behavior could repeatedly send CRITICAL email every monitor pass.
@@ -408,6 +479,15 @@ watch -n 2 asgs-mon --status
 This is also useful for external supervision: another service can determine
 whether the heartbeat itself has gone stale, something a dead `asgs-mon`
 process cannot report about itself.
+
+### Structured check details
+
+Checks may optionally write one JSON object to the temporary path supplied in
+`ASGS_MON_RESULT_FILE`. The supervisor validates and consumes the file, removes
+it immediately, and adds the object as `details` in the check's status snapshot
+and adapter event. Existing checks do not need to use this facility. The
+`atcf-sanity` check uses it so future dashboards can consume the same timeline
+assessment shown to an operator.
 
 ### Adapter seam
 

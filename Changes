@@ -1,5 +1,36 @@
 # Changes
 
+## 0.2.2 - 2026-09-03
+
+* Added disabled-by-default `atcf-sanity`, a read-only tropical-cyclone/ATCF
+  timeline diagnostic for operational NHC feeds and replay/testing feeds.
+* Probes known ASGS ATCF adapters (`get_atcf.pl` and `get_atcf_http.pl`) only
+  inside a private temporary directory; it never downloads into or modifies
+  the active ASGS run directory.
+* Correlates ATCF advisory/model time and forecast extent with ASGS state,
+  `COLDSTARTDATE`, `HINDCASTLENGTH`, hotstart `HSTIME`, and current
+  `run.properties` / `*.run-control.properties` clocks.
+* Detects `forecast_end_time <= advisory_time`, `RunEndTime <= RunStartTime`,
+  tiny remaining ADCIRC forecast durations, and the `2*dt` safeguard precursor.
+* Detects hotstart model clocks that are ahead of the current ATCF advisory and
+  warns when a reused hotstart was produced under a different cold-start epoch.
+* Preserves intermediate advisory suffixes such as `002A` when visible in the
+  Forecast/Advisory product, while separately reporting adapters that collapse
+  the suffix to a numeric advisory.
+* Intentionally performs no wall-clock-age failure test; replay and operational
+  data are judged by relative model-time invariants.
+* Keeps a tiny monitor-owned history keyed by profile configuration/cold-start
+  epoch so a distinct next advisory whose model time does not advance is
+  reported as CRITICAL without confusing a deliberate replay rebase with age.
+* Added an optional `ASGS_MON_RESULT_FILE` JSON sidecar contract so checks can
+  attach structured details to status snapshots and future adapter events
+  without changing the existing human stdout contract.
+* `asgs-mon --check CHECK` now prints the complete diagnostic output for an
+  explicit one-shot operator check.
+* Added mocked RSS/ATCF regression coverage for intermediate advisories,
+  read-only sandboxing, stale/reused hotstarts, collapsed four-second forecasts,
+  and forecast-end-at-start failures.
+
 ## 0.2.1 - 2026-09-03
 
 * Treats the loaded profile/`ASGS_CONFIG` as the durable monitored identity and

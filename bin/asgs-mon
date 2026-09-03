@@ -32,7 +32,7 @@ use Term::ANSIColor  qw/:constants colorstrip/;
 use Time::HiRes      qw/gettimeofday tv_interval usleep/;
 use Util::H2O::More  qw/Getopt2h2o h2o ini2h2o/;
 
-our $VERSION = q{0.2.1};
+our $VERSION = q{0.2.2};
 
 use constant {
     DEFAULT_DELAY          => 10,
@@ -899,10 +899,12 @@ sub run_one_check {
     refresh_asgs_process($ctx, $opts, initial => 1);
     export_context($ctx, 1, $opts);
 
-    my $notify = h2o { enabled => 0, email => undef, config => undef, hush => DEFAULT_HUSH };
     my $path = File::Spec->catfile($AVAILABLE, $name);
     my $result = execute_check($name, $path, $ctx, $opts, 1);
-    present_result($name, $result, $notify, $ctx, $opts);
+
+    # --check is an operator diagnostic command. Show the complete check output
+    # rather than only the alert subject; notifications and adapters remain off.
+    print STDOUT $result->{output} if defined($result->{output}) && $result->{output} ne q{};
     return $result->{retcode} == OK ? EXIT_SUCCESS : $result->{retcode};
 }
 
@@ -939,10 +941,34 @@ sub execute_check {
         say STDERR "DEBUG: exec " . join(q{ }, map { shell_display($_) } ($path, @params));
     }
 
+    # Optional structured result sidecar. A check may write one JSON object to
+    # ASGS_MON_RESULT_FILE; the supervisor validates, consumes, and removes it.
+    # This keeps human stdout compatible while enriching status/adapter events.
+    my $result_tmp = $ENV{ASGS_TMPDIR};
+    $result_tmp = File::Spec->tmpdir if not defined($result_tmp) or not -d $result_tmp;
+    my $safe_plugin = $plugin;
+    $safe_plugin =~ s/[^A-Za-z0-9_.-]+/_/g;
+    my $result_file = File::Spec->catfile($result_tmp, "asgs-mon-result-$$-$count-$safe_plugin.json");
+    unlink $result_file if -e $result_file;
+    $ENV{ASGS_MON_RESULT_FILE} = $result_file;
+
     my $started = [gettimeofday];
     my ($output, $retcode, $timed_out, $exec_error) =
         run_capture($path, \@params, $opts->timeout);
     my $duration_ms = int(tv_interval($started) * 1000);
+
+    my $details;
+    if (-r $result_file && -s $result_file && -s $result_file <= 1_048_576) {
+        if (open my $dfh, q{<}, $result_file) {
+            local $/;
+            my $raw = <$dfh>;
+            close $dfh;
+            my $decoded = eval { decode_json($raw) };
+            $details = $decoded if $decoded && ref($decoded) eq q{HASH};
+        }
+    }
+    unlink $result_file if -e $result_file;
+    delete $ENV{ASGS_MON_RESULT_FILE};
 
     if ($timed_out) {
         $retcode = UNKNOWN;
@@ -973,6 +999,12 @@ sub execute_check {
     my ($subject) = split /\n/, ($output // q{}), 2;
     $subject //= q{};
 
+    if (!defined($details) && defined($lastret) && $retcode == $lastret
+        && $subject eq $lastout && $CACHE{$plugin}->{last}
+        && defined($CACHE{$plugin}->{last}->{details})) {
+        $details = $CACHE{$plugin}->{last}->{details};
+    }
+
     my $result = {
         retcode     => $retcode,
         output      => $output // q{},
@@ -981,6 +1013,7 @@ sub execute_check {
         duration_ms => $duration_ms,
         ran_at      => time,
     };
+    $result->{details} = $details if defined $details;
 
     return $result;
 }
@@ -1187,6 +1220,7 @@ sub build_event {
         duration_ms  => 0 + ($result->{duration_ms} // 0),
         notified     => $sent ? JSON::PP::true : JSON::PP::false,
         suppressed   => $suppressed ? JSON::PP::true : JSON::PP::false,
+        (defined($result->{details}) ? (details => $result->{details}) : ()),
     };
 }
 
@@ -1242,6 +1276,7 @@ sub write_runtime_snapshot {
             duration_ms => 0 + ($last->{duration_ms} // 0),
             notified    => $last->{notified},
             suppressed  => $last->{suppressed},
+            (defined($last->{details}) ? (details => $last->{details}) : ()),
         };
     }
 
