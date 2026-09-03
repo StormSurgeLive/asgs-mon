@@ -79,10 +79,16 @@ printf "  storm:             %s%s%s\n",
     defined($source->{storm}) ? $source->{storm} : ($cfg->{storm} // q{??}),
     defined($source->{year}) ? $source->{year} : ($cfg->{year} // q{????});
 printf "  storm name:        %s\n", $source->{name} // q{unknown};
-printf "  advisory:          %s\n", $source->{product_advisory} // $source->{adapter_advisory} // q{unknown};
-if (defined($source->{product_advisory}) && defined($source->{adapter_advisory})
-    && $source->{product_advisory} ne $source->{adapter_advisory}) {
-    printf "  adapter advisory:  %s\n", $source->{adapter_advisory};
+printf "  source advisory:   %s\n", $source->{product_advisory} // q{unknown};
+if (defined $source->{adapter_advisory_raw}) {
+    my $adapter_text = $source->{adapter_advisory_raw};
+    if (defined($source->{adapter_advisory}) && $source->{adapter_advisory} ne $adapter_text) {
+        $adapter_text .= " (normalized $source->{adapter_advisory})";
+    }
+    printf "  adapter advisory:  %s\n", $adapter_text;
+}
+else {
+    printf "  adapter advisory:  %s\n", $source->{adapter_advisory} // q{unknown};
 }
 printf "  advisory time:     %s\n", $source->{model_time} // q{unknown};
 printf "  forecast through:  %s\n", $source->{forecast_end_time} // q{unknown};
@@ -90,7 +96,11 @@ printf "  forecast length:   %s\n",
     defined($source->{forecast_hours}) ? sprintf(q{%.3f h}, $source->{forecast_hours}) : q{unknown};
 
 print "\nASGS\n";
-printf "  state advisory:    %s\n", $asgs->{advisory} // q{unknown};
+my $state_adv_text = $asgs->{advisory_raw} // $asgs->{advisory} // q{unknown};
+if (defined($asgs->{advisory}) && $asgs->{advisory} ne $state_adv_text) {
+    $state_adv_text .= " (normalized $asgs->{advisory})";
+}
+printf "  state advisory:    %s\n", $state_adv_text;
 printf "  cycle:             %s\n", $asgs->{cycle} // q{unknown};
 printf "  cold start:        %s\n", $asgs->{cold_start} // q{unknown};
 printf "  hindcast length:   %s\n",
@@ -106,16 +116,42 @@ if (defined $hot->{producer_cold_start}) {
     printf "  producer coldstart:%s\n", " $hot->{producer_cold_start}";
 }
 
-my $scenarios = $result->{scenarios} || [];
+my $timeline = $result->{timeline} || {};
+if (defined($source->{model_time}) || defined($hot->{model_time})) {
+    print "\nTimeline\n";
+    printf "  hotstart model:    %s\n", $hot->{model_time} // q{unknown};
+    printf "  ATCF advisory:     %s\n", $source->{model_time} // q{unknown};
+    if (defined $timeline->{hotstart_to_advisory_hours}) {
+        my $hours = 0 + $timeline->{hotstart_to_advisory_hours};
+        if ($hours > 0) {
+            printf "  advance required:  %.3f h\n", $hours;
+        }
+        elsif ($hours < 0) {
+            printf "  hotstart ahead by: %.3f h\n", -$hours;
+        }
+        else {
+            print "  advance required:  0.000 h\n";
+        }
+    }
+    printf "  ATCF forecast end: %s\n", $source->{forecast_end_time} // q{unknown};
+}
+
+my $scenarios = $result->{scenario_summary} || $result->{scenarios} || [];
 if (@$scenarios) {
-    print "\nScenario clocks\n";
+    print "\nScenario clocks (deduplicated)\n";
     for my $s (@$scenarios) {
-        printf "  %-20s start=%s end=%s",
-            $s->{scenario} // q{scenario}, $s->{run_start} // q{?}, $s->{run_end} // q{?};
+        my $label = ref($s->{scenarios}) eq q{ARRAY}
+            ? join(q{, }, @{ $s->{scenarios} })
+            : ($s->{scenario} // q{scenario});
+        printf "  %-32s start=%s end=%s",
+            $label, $s->{run_start} // q{?}, $s->{run_end} // q{?};
         printf " remaining=%.3fs", $s->{adcirc_remaining_seconds}
             if defined $s->{adcirc_remaining_seconds};
         printf " rnday=%s", $s->{rnday} if defined $s->{rnday};
         printf " dt=%s", $s->{dt} if defined $s->{dt};
+        if (($s->{source_count} // 0) > 1) {
+            printf " [%d property files]", $s->{source_count};
+        }
         print "\n";
     }
 }

@@ -28,7 +28,7 @@ our @EXPORT_OK = qw(
     run_sanity_check
 );
 
-our $VERSION = q{0.1.0};
+our $VERSION = q{0.1.1};
 
 my %STATUS_CODE = (
     OK       => 0,
@@ -200,13 +200,15 @@ sub parse_source_product {
     $plain =~ s/\r//g;
 
     while ($plain =~ /(?:^|\n|\s)([A-Z][A-Z0-9-]*)\s+FORECAST\s*\/\s*ADVISORY\s+NUMBER\s+(\d{1,3}[A-Z]?).{0,1000}?\bAL(\d{2})(\d{4})\b/gis) {
-        my ($name, $adv, $s, $y) = (uc($1), normalize_advisory($2), $3, $4);
+        my ($name, $adv_raw, $s, $y) = (uc($1), uc(_trim($2)), $3, $4);
+        my $adv = normalize_advisory($adv_raw);
         push @products, {
             basin    => q{AL},
             storm    => sprintf(q{%02d}, $s),
             year     => $y,
             name     => $name,
             advisory => $adv,
+            advisory_raw => $adv_raw,
             matches_config => ((defined $storm ? sprintf(q{%02d}, $storm) eq sprintf(q{%02d}, $s) : 1)
                                && (defined $year ? "$year" eq "$y" : 1)) ? 1 : 0,
         };
@@ -215,7 +217,8 @@ sub parse_source_product {
     # Some feeds do not keep the storm name immediately adjacent. Preserve
     # advisory identity even when the name cannot be extracted.
     while ($plain =~ /FORECAST\s*\/\s*ADVISORY\s+NUMBER\s+(\d{1,3}[A-Z]?).{0,1000}?\bAL(\d{2})(\d{4})\b/gis) {
-        my ($adv, $s, $y) = (normalize_advisory($1), $2, $3);
+        my ($adv_raw, $s, $y) = (uc(_trim($1)), $2, $3);
+        my $adv = normalize_advisory($adv_raw);
         next if grep { $_->{advisory} eq $adv && $_->{storm} eq sprintf(q{%02d}, $s) && $_->{year} eq $y } @products;
         push @products, {
             basin    => q{AL},
@@ -223,6 +226,7 @@ sub parse_source_product {
             year     => $y,
             name     => undef,
             advisory => $adv,
+            advisory_raw => $adv_raw,
             matches_config => ((defined $storm ? sprintf(q{%02d}, $storm) eq sprintf(q{%02d}, $s) : 1)
                                && (defined $year ? "$year" eq "$y" : 1)) ? 1 : 0,
         };
@@ -538,13 +542,15 @@ sub _probe_source {
 
     my $atcf = -s $fst ? parse_atcf_file($fst) : undef;
     my $products = parse_source_product($source_text, $arg{storm}, $arg{year});
-    my $adapter_adv;
+    my ($adapter_adv, $adapter_adv_raw);
     my $combined = ($run->{stdout} // q{}) . "\n" . ($run->{stderr} // q{});
     if ($combined =~ /Advisory\s+'?(\d{1,3}[A-Z]?)'?/i) {
-        $adapter_adv = normalize_advisory($1);
+        $adapter_adv_raw = uc _trim($1);
+        $adapter_adv = normalize_advisory($adapter_adv_raw);
     }
     elsif (($run->{stdout} // q{}) =~ /^\s*(\d{1,3}[A-Z]?)\s*$/m) {
-        $adapter_adv = normalize_advisory($1);
+        $adapter_adv_raw = uc _trim($1);
+        $adapter_adv = normalize_advisory($adapter_adv_raw);
     }
 
     return {
@@ -557,6 +563,7 @@ sub _probe_source {
         stderr           => $run->{stderr},
         products         => $products,
         adapter_advisory => $adapter_adv,
+        adapter_advisory_raw => $adapter_adv_raw,
         atcf             => $atcf,
         fst_present      => -s $fst ? 1 : 0,
         metadata         => -s $metadata ? read_properties($metadata) : {},
@@ -615,6 +622,132 @@ sub _worst_status {
     return $worst;
 }
 
+sub _scenario_label {
+    my ($path) = @_;
+    my $base = basename($path // q{});
+    return $1 if $base =~ /^(.+)\.run-control\.properties$/;
+    return basename(dirname($path)) if $base eq q{run.properties};
+    return $base || q{scenario};
+}
+
+sub _fmt_signature_value {
+    my ($v) = @_;
+    return q{-} if not defined $v;
+    return sprintf(q{%.6f}, $v) if $v =~ /^-?\d+(?:\.\d+)?(?:[Ee][+-]?\d+)?$/;
+    return "$v";
+}
+
+sub _scenario_summary {
+    my ($scenarios) = @_;
+    my %groups;
+    for my $s (@{ $scenarios || [] }) {
+        my $sig = join q{|},
+            map { _fmt_signature_value($_) }
+            ($s->{run_start}, $s->{run_end}, $s->{adcirc_remaining_seconds}, $s->{rnday});
+        my $g = $groups{$sig} ||= {
+            run_start => $s->{run_start},
+            run_end => $s->{run_end},
+            adcirc_remaining_seconds => $s->{adcirc_remaining_seconds},
+            rnday => $s->{rnday},
+            dt => $s->{dt},
+            scenarios => [],
+            paths => [],
+        };
+        $g->{dt} = $s->{dt} if not defined($g->{dt}) && defined($s->{dt});
+        push @{ $g->{scenarios} }, $s->{scenario} if defined $s->{scenario};
+        push @{ $g->{paths} }, $s->{path} if defined $s->{path};
+    }
+
+    my @out;
+    for my $g (values %groups) {
+        my %seen;
+        $g->{scenarios} = [ sort grep { defined($_) && $_ ne q{} && !$seen{$_}++ } @{ $g->{scenarios} } ];
+        $g->{source_count} = scalar @{ $g->{paths} };
+        push @out, $g;
+    }
+    return [
+        sort {
+            join(q{,}, @{ $a->{scenarios} }) cmp join(q{,}, @{ $b->{scenarios} })
+            || ($a->{run_start} // q{}) cmp ($b->{run_start} // q{})
+            || ($a->{run_end} // q{}) cmp ($b->{run_end} // q{})
+        } @out
+    ];
+}
+
+sub _aggregate_scenario_issues {
+    my ($issues) = @_;
+    my %groups;
+    my @order;
+    my @other;
+    for my $i (@{ $issues || [] }) {
+        if (!defined($i->{scenario}) || $i->{scenario} eq q{}) {
+            push @other, { %$i };
+            next;
+        }
+        my $key = join q{|}, ($i->{severity} // q{}), ($i->{id} // q{});
+        if (!exists $groups{$key}) {
+            $groups{$key} = {
+                severity => $i->{severity},
+                id => $i->{id},
+                scenarios => [],
+                paths => [],
+                remaining_seconds => [],
+                guard_seconds => [],
+            };
+            push @order, $key;
+        }
+        my $g = $groups{$key};
+        push @{ $g->{scenarios} }, $i->{scenario};
+        push @{ $g->{paths} }, $i->{path} if defined $i->{path};
+        push @{ $g->{remaining_seconds} }, $i->{remaining_seconds} if defined $i->{remaining_seconds};
+        push @{ $g->{guard_seconds} }, $i->{guard_seconds} if defined $i->{guard_seconds};
+    }
+
+    my @out = @other;
+    for my $key (@order) {
+        my $g = $groups{$key};
+        my %seen;
+        my @names = sort grep { !$seen{$_}++ } @{ $g->{scenarios} };
+        my $where = join(q{, }, @names);
+        my $msg;
+        if ($g->{id} eq q{run_end_not_after_start}) {
+            $msg = "RunEndTime is not after RunStartTime in: $where";
+        }
+        elsif ($g->{id} eq q{rnday_2dt_guard}) {
+            my $min = @{ $g->{remaining_seconds} }
+                ? (sort { $a <=> $b } @{ $g->{remaining_seconds} })[0] : undef;
+            my $guard = @{ $g->{guard_seconds} }
+                ? (sort { $b <=> $a } @{ $g->{guard_seconds} })[0] : undef;
+            $msg = "rnday reaches the ADCIRC 2*dt safeguard in: $where";
+            $msg .= sprintf(q{ (minimum remaining %.3fs; 2*dt %.3fs)}, $min, $guard)
+                if defined($min) && defined($guard);
+        }
+        elsif ($g->{id} eq q{forecast_duration_tiny}) {
+            my $min = @{ $g->{remaining_seconds} }
+                ? (sort { $a <=> $b } @{ $g->{remaining_seconds} })[0] : undef;
+            $msg = "ADCIRC remaining forecast duration is under 60 seconds in: $where";
+            $msg .= sprintf(q{ (minimum %.3fs)}, $min) if defined $min;
+        }
+        elsif ($g->{id} eq q{rnday_exhausted}) {
+            $msg = "rnday leaves no forecast time after hotstart in: $where";
+        }
+        elsif ($g->{id} eq q{run_time_malformed}) {
+            $msg = "RunStartTime/RunEndTime is incomplete or malformed in: $where";
+        }
+        else {
+            $msg = "$g->{id} affects: $where";
+        }
+        push @out, {
+            severity => $g->{severity},
+            id => $g->{id},
+            message => $msg,
+            scenarios => \@names,
+            paths => $g->{paths},
+        };
+    }
+    return \@out;
+}
+
 sub _scenario_assessments {
     my (%arg) = @_;
     my @scenarios;
@@ -637,8 +770,7 @@ sub _scenario_assessments {
         my $ihs = $p->{InitialHotStartTime};
         $ihs = 0 if not defined($ihs) || $ihs !~ /^\d+(?:\.\d+)?(?:[Ee][+-]?\d+)?$/;
 
-        my $scenario = basename(dirname($path));
-        $scenario = basename($path) if basename($path) ne q{run.properties};
+        my $scenario = _scenario_label($path);
         my $item = {
             path => $path,
             scenario => $scenario,
@@ -652,12 +784,14 @@ sub _scenario_assessments {
             $item->{duration_seconds} = $end_epoch - $start_epoch;
             if ($end_epoch <= $start_epoch) {
                 _add_issue(\@issues, q{CRITICAL}, q{run_end_not_after_start},
-                    "$scenario: RunEndTime=$end is not after RunStartTime=$start", path => $path);
+                    "$scenario: RunEndTime=$end is not after RunStartTime=$start",
+                    path => $path, scenario => $scenario, run_start => $start, run_end => $end);
             }
         }
         elsif ((defined($start) && $start ne q{}) || (defined($end) && $end ne q{})) {
             _add_issue(\@issues, q{WARNING}, q{run_time_malformed},
-                "$scenario: RunStartTime/RunEndTime is incomplete or malformed", path => $path);
+                "$scenario: RunStartTime/RunEndTime is incomplete or malformed",
+                path => $path, scenario => $scenario);
         }
 
         if (defined $rnday) {
@@ -665,15 +799,18 @@ sub _scenario_assessments {
             $item->{adcirc_remaining_seconds} = $remaining;
             if ($remaining <= 0) {
                 _add_issue(\@issues, q{CRITICAL}, q{rnday_exhausted},
-                    sprintf(q{%s: rnday leaves %.3f seconds after hotstart (must be > 0)}, $scenario, $remaining), path => $path);
+                    sprintf(q{%s: rnday leaves %.3f seconds after hotstart (must be > 0)}, $scenario, $remaining),
+                    path => $path, scenario => $scenario, remaining_seconds => 0 + $remaining);
             }
             if (defined $dt && $remaining <= (2 * $dt + 0.001)) {
                 _add_issue(\@issues, q{CRITICAL}, q{rnday_2dt_guard},
-                    sprintf(q{%s: rnday leaves %.3f seconds after hotstart, <= 2*dt (%.3f s)}, $scenario, $remaining, 2 * $dt), path => $path);
+                    sprintf(q{%s: rnday leaves %.3f seconds after hotstart, <= 2*dt (%.3f s)}, $scenario, $remaining, 2 * $dt),
+                    path => $path, scenario => $scenario, remaining_seconds => 0 + $remaining, guard_seconds => 0 + (2 * $dt));
             }
             if ($remaining > 0 && $remaining < 60) {
                 _add_issue(\@issues, q{CRITICAL}, q{forecast_duration_tiny},
-                    sprintf(q{%s: ADCIRC remaining forecast duration is only %.3f seconds}, $scenario, $remaining), path => $path);
+                    sprintf(q{%s: ADCIRC remaining forecast duration is only %.3f seconds}, $scenario, $remaining),
+                    path => $path, scenario => $scenario, remaining_seconds => 0 + $remaining);
             }
         }
         push @scenarios, $item;
@@ -840,7 +977,9 @@ sub run_sanity_check {
                 "Forecast/Advisory product identifies AL$p->{storm}$p->{year}, not configured AL$v{STORM}$v{YEAR}");
         }
         my $product_adv = $product ? $product->{advisory} : undef;
+        my $product_adv_raw = $product ? $product->{advisory_raw} : undef;
         my $adapter_adv = $probe->{adapter_advisory};
+        my $adapter_adv_raw = $probe->{adapter_advisory_raw};
         if (defined($product_adv) && $product_adv =~ /[A-Z]$/ && defined($adapter_adv)
             && $adapter_adv !~ /[A-Z]$/ && substr($product_adv, 0, 3) eq substr($adapter_adv, 0, 3)) {
             push @notes, "adapter advisory precision is limited: source reports $product_adv but adapter reports $adapter_adv";
@@ -852,7 +991,9 @@ sub run_sanity_check {
             year => 0 + $v{YEAR},
             name => _first_defined($product ? $product->{name} : undef, $a->{name}),
             product_advisory => $product_adv,
+            product_advisory_raw => $product_adv_raw,
             adapter_advisory => $adapter_adv,
+            adapter_advisory_raw => $adapter_adv_raw,
             model_time => $a->{model_time},
             model_epoch => $a->{model_epoch},
             forecast_end_time => $a->{forecast_end_time},
@@ -892,7 +1033,9 @@ sub run_sanity_check {
     my ($scenarios, $scenario_issues) = _scenario_assessments(
         rundir => $rundir, advisory => $advisory, timestepsize => $timestepsize,
     );
-    push @issues, @$scenario_issues;
+    my $scenario_summary = _scenario_summary($scenarios);
+    my $scenario_assessments = _aggregate_scenario_issues($scenario_issues);
+    push @issues, @$scenario_assessments;
 
     # Fill missing coldstart/hindcast from the newest run.properties evidence.
     for my $s (@$scenarios) {
@@ -934,6 +1077,28 @@ sub run_sanity_check {
         _add_issue(\@issues, q{CRITICAL}, q{hotstart_after_advisory},
             sprintf(q{ADCIRC hotstart model clock %s is %.2fh after ATCF advisory/model time %s},
                 $hotstart->{model_time}, $delta_h, $source->{model_time}));
+    }
+
+    my $timeline = {};
+    if (defined($source->{model_epoch}) && defined($hotstart->{model_epoch})) {
+        my $delta = $source->{model_epoch} - $hotstart->{model_epoch};
+        $timeline->{hotstart_to_advisory_seconds} = 0 + $delta;
+        $timeline->{hotstart_to_advisory_hours} = 0 + ($delta / 3600);
+        $timeline->{hotstart_before_advisory} = $delta >= 0 ? JSON::PP::true : JSON::PP::false;
+        $timeline->{relation} = $delta > 0 ? q{hotstart_before_advisory}
+                              : $delta < 0 ? q{hotstart_after_advisory}
+                              : q{hotstart_at_advisory};
+        if ($delta > 0) {
+            _add_issue(\@issues, q{INFO}, q{hotstart_before_advisory},
+                sprintf(q{hotstart model clock is %.3fh before ATCF advisory/model time; nowcast advance is required and this is not a failure by itself},
+                    $delta / 3600));
+        }
+    }
+    if (defined($source->{forecast_end_epoch}) && defined($source->{model_epoch})) {
+        $timeline->{advisory_to_forecast_end_seconds} =
+            0 + ($source->{forecast_end_epoch} - $source->{model_epoch});
+        $timeline->{advisory_to_forecast_end_hours} =
+            0 + (($source->{forecast_end_epoch} - $source->{model_epoch}) / 3600);
     }
 
     # Relative source freshness only: never compare ATCF timestamps to wall clock.
@@ -994,13 +1159,17 @@ sub run_sanity_check {
         source => $source,
         asgs => {
             advisory => $state_adv || $advisory,
+            advisory_raw => defined($advisory) ? _trim($advisory) : undef,
             cycle => _first_defined($state->{cycle}, $advisory),
             cold_start => $coldstart,
             hindcast_days => defined($hindcast) && $hindcast =~ /^\d+(?:\.\d+)?$/ ? 0 + $hindcast : $hindcast,
             rundir => $rundir,
         },
         hotstart => $hotstart,
+        timeline => $timeline,
         scenarios => $scenarios,
+        scenario_summary => $scenario_summary,
+        scenario_issues => $scenario_issues,
         previous_source => $previous_source,
         issues => \@issues,
         notes => \@notes,

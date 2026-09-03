@@ -32,7 +32,7 @@ use Term::ANSIColor  qw/:constants colorstrip/;
 use Time::HiRes      qw/gettimeofday tv_interval usleep/;
 use Util::H2O::More  qw/Getopt2h2o h2o ini2h2o/;
 
-our $VERSION = q{0.2.2};
+our $VERSION = q{0.2.3};
 
 use constant {
     DEFAULT_DELAY          => 10,

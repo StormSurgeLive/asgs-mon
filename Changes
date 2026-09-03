@@ -1,5 +1,20 @@
 # Changes
 
+## 0.2.3 - 2026-09-03
+
+* Refined `atcf-sanity` operator output after the first live AL052026 replay
+  test without broadening its failure rules.
+* Shows source, adapter, and ASGS advisory identities separately, preserving
+  the adapter's raw token (for example `03`) alongside normalized identity.
+* Adds an explicit hotstart-to-advisory timeline delta so a legitimate
+  nowcast advance (for example +12h) is visible separately from a collapsed
+  generated scenario clock.
+* Deduplicates identical scenario clock observations in human output while
+  retaining every property-file observation in structured JSON.
+* Aggregates repeated scenario failures into one assessment per underlying
+  condition, with affected scenarios listed, while retaining raw scenario
+  issue evidence in JSON.
+
 ## 0.2.2 - 2026-09-03
 
 * Added disabled-by-default `atcf-sanity`, a read-only tropical-cyclone/ATCF

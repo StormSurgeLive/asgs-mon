@@ -172,7 +172,7 @@ Additional checks remain available but disabled by default.
 
 ## ATCF / tropical-cyclone sanity check
 
-Version 0.2.2 includes a conservative, read-only ATCF timeline diagnostic. It
+Version 0.2.2 introduced a conservative, read-only ATCF timeline diagnostic; 0.2.3 refines its operator-facing observability without broadening the failure rules. It
 is available but **disabled by default** until it has been exercised across
 more operational profiles.
 
@@ -503,6 +503,22 @@ can later be used by an HTTPS adapter that reports to a central web dashboard
 without changing individual checks.
 
 See `adapters/README.md`.
+
+## ATCF/tropical-cyclone sanity check
+
+`atcf-sanity` is available but disabled by default. Run it explicitly with:
+
+```bash
+asgs-mon --check atcf
+```
+
+For tropical-cyclone profiles it performs a read-only sandbox probe of known
+ASGS ATCF adapters and correlates source/advisory time, ASGS state, the actual
+hotstart clock, and generated scenario clocks. Human output groups duplicate
+property-file observations and reports source/adapter/ASGS advisory identities
+separately; the structured result retains the full raw evidence. No ATCF
+timestamp is judged against wall-clock age, so replay runs are assessed by the
+same relative model-time invariants as operational runs.
 
 ## Developing a check
 
