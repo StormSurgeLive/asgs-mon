@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+#--------------------------------------------------------------------------
+# 013-slurm-sinfo
+#
+# Report Slurm utilization for the ASGS QUEUENAME and SERQUEUE partitions
+# using bin/asgs-slurm-stat.
+#
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
+#
+# This file is part of the ADCIRC Surge Guidance System (ASGS).
+#--------------------------------------------------------------------------
+
+source "${ASGS_MON_LIB:-${ASGS_MON_PLUGINDIR}/_bash-helper-functions.sh}"
+mon_init "$@"
+
+# Run on the first pass, then every fifth asgs-mon check iteration.
+mon_every 5
+
+# This check only applies to Slurm platforms.
+if [[ "${QUEUESYS:-}" != "SLURM" ]]; then
+    mon_skip "QUEUESYS=${QUEUESYS:-undefined}; Slurm queue status not applicable"
+fi
+
+# SCRIPTDIR should come from the loaded ASGS profile/environment.
+mon_require_var SCRIPTDIR
+
+STAT="$SCRIPTDIR/bin/asgs-slurm-stat"
+
+if [[ ! -x "$STAT" ]]; then
+    mon_unknown "asgs-slurm-stat is not executable: $STAT"
+fi
+
+#
+# asgs-slurm-stat exit codes:
+#
+#   0 = utilization OK
+#   1 = QUEUENAME utilization exceeds warning threshold
+#   3 = unable to determine Slurm status
+#
+report=$("$STAT" 2>&1)
+rc=$?
+
+# The report itself is useful in the interactive monitor pane.
+if [[ "$VERBOSE" == 1 ]]; then
+    printf '%s\n' "$report" >&2
+fi
+
+case "$rc" in
+    0)
+        mon_ok "Slurm queue utilization OK"
+        ;;
+
+    1)
+        mon_warning \
+            "QUEUENAME utilization exceeds ${ASGS_SLURM_UTIL_WARN:-95}%"
+        ;;
+
+    3)
+        mon_unknown "unable to determine Slurm queue utilization" <<EOF
+$report
+EOF
+        ;;
+
+    *)
+        mon_unknown "asgs-slurm-stat returned unexpected exit status $rc" <<EOF
+$report
+EOF
+        ;;
+esac
