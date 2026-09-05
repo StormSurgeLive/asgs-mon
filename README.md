@@ -241,6 +241,25 @@ a new cold-start epoch starts a new comparison sequence.
 The full structured ATCF assessment is attached to the normal status/adapter
 JSON under the check's `details` object.
 
+## LSU/LONI quota check
+
+`014-showquota` is intended for LSU/LONI systems where `showquota` is available.
+It is skipped when the command is absent. The check uses `HPCENVSHORT` and
+`HPCENV` from the loaded ASGS environment and reports:
+
+* filesystem MB quotas where the quota is nonzero;
+* filesystem file quotas where `fquota` is nonzero;
+* all storage allocations and their MB utilization;
+* all CPU/SU allocations using `allocated - remaining`;
+* the highest storage and CPU/SU utilization when multiple allocations exist.
+
+The defaults are WARNING above 75% and CRITICAL above 95%. They may be adjusted
+with `ASGS_MON_SHOWQUOTA_WARN` and `ASGS_MON_SHOWQUOTA_CRIT`. Status remains
+visible at those thresholds, but email is requested only when both the highest
+CPU/SU allocation and highest storage allocation exceed the critical threshold.
+The check uses the supervisor's normal notification/hush machinery; it does not
+send mail directly.
+
 ## Notification limiting
 
 The old behavior could repeatedly send CRITICAL email every monitor pass.
@@ -488,6 +507,14 @@ it immediately, and adds the object as `details` in the check's status snapshot
 and adapter event. Existing checks do not need to use this facility. The
 `atcf-sanity` check uses it so future dashboards can consume the same timeline
 assessment shown to an operator.
+
+A check may also include a JSON boolean `notify` field in that object. When
+`notify` is false, the supervisor still records and displays the check's normal
+WARNING/CRITICAL/UNKNOWN status but suppresses email for that result. The field
+is opt-in; if it is absent, existing notification behavior is unchanged. A
+transition from `notify:false` to `notify:true` can send an alert even when the
+check remains at the same severity. This allows a check to express a narrow
+notification rule without implementing its own mail subsystem.
 
 ### Adapter seam
 

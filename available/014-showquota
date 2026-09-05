@@ -1,0 +1,514 @@
+#!/usr/bin/env perl
+#--------------------------------------------------------------------------
+# 014-showquota
+#
+# LSU/LONI filesystem, storage-allocation, and CPU/SU quota monitoring.
+#
+# Copyright(C) 2024-present Brett Estrade
+# Copyright(C) 2024-present Jason Fleming
+#
+# This file is part of the ADCIRC Surge Guidance System (ASGS).
+#--------------------------------------------------------------------------
+
+use v5.12;
+use strict;
+use warnings;
+
+use IPC::Open3 qw/open3/;
+use Symbol qw/gensym/;
+use JSON::PP qw/encode_json/;
+
+use constant {
+    OK       => 0,
+    WARNING  => 1,
+    CRITICAL => 2,
+    UNKNOWN  => 3,
+};
+
+my ($oldout, $oldexit, $count, $delay, $profile, $config, $statefile, $verbose) = @ARGV;
+
+$profile = $ENV{ASGS_MON_PROFILE} if defined $ENV{ASGS_MON_PROFILE};
+$profile //= q{unknown};
+my $hpcshort = $ENV{ASGS_MON_HPCENVSHORT} // $ENV{HPCENVSHORT} // q{unknown};
+my $hpcenv   = $ENV{ASGS_MON_HPCENV}      // $ENV{HPCENV}      // q{unknown};
+
+my $warn = numeric_env(q{ASGS_MON_SHOWQUOTA_WARN}, 75);
+my $crit = numeric_env(q{ASGS_MON_SHOWQUOTA_CRIT}, 95);
+
+if ($warn < 0 || $warn > 100 || $crit < 0 || $crit > 100 || $warn >= $crit) {
+    emit_unknown(
+        q{invalid showquota thresholds},
+        "ASGS_MON_SHOWQUOTA_WARN=$warn\nASGS_MON_SHOWQUOTA_CRIT=$crit\nExpected 0 <= WARN < CRIT <= 100.\n",
+        { reason => q{invalid_thresholds}, notify => JSON::PP::false },
+    );
+}
+
+my $showquota = command_in_path(q{showquota});
+if (not defined $showquota) {
+    if ($verbose) {
+        print STDERR "($hpcshort $profile - 014-showquota) skipped: showquota is not available in PATH\n";
+    }
+    print $oldout if defined($oldout) && $oldout ne q{};
+    exit OK;
+}
+
+my ($stdout, $stderr, $rc) = run_command($showquota);
+if ($rc != 0) {
+    my $body = "showquota exited with status $rc.\n";
+    $body .= "\nSTDERR:\n$stderr" if defined($stderr) && $stderr =~ /\S/;
+    $body .= "\nSTDOUT:\n$stdout" if defined($stdout) && $stdout =~ /\S/;
+    emit_unknown(
+        q{showquota failed},
+        $body,
+        { reason => q{showquota_failed}, command_rc => $rc, notify => JSON::PP::false },
+    );
+}
+
+my $parsed = parse_showquota($stdout // q{});
+my $resource = resource_name($hpcshort, $hpcenv);
+
+my @assessed;
+my @filesystem_lines;
+for my $fs (@{$parsed->{filesystem}}) {
+    if (defined($fs->{mb_quota}) && $fs->{mb_quota} > 0) {
+        my $pct = percent($fs->{mb_used}, $fs->{mb_quota});
+        my $sev = severity_for($pct, $warn, $crit);
+        push @assessed, $sev;
+        $fs->{mb_percent} = $pct;
+        $fs->{mb_status} = status_name($sev);
+        push @filesystem_lines, sprintf(
+            "%-22s %s / %s MB  %8.2f%%  %s",
+            $fs->{filesystem}, fmt_num($fs->{mb_used}), fmt_num($fs->{mb_quota}),
+            $pct, status_name($sev),
+        );
+    }
+    if (defined($fs->{fquota}) && $fs->{fquota} > 0) {
+        my $pct = percent($fs->{files}, $fs->{fquota});
+        my $sev = severity_for($pct, $warn, $crit);
+        push @assessed, $sev;
+        $fs->{file_percent} = $pct;
+        $fs->{file_status} = status_name($sev);
+        push @filesystem_lines, sprintf(
+            "%-22s %s / %s files %8.2f%%  %s",
+            $fs->{filesystem} . q{ files}, fmt_num($fs->{files}), fmt_num($fs->{fquota}),
+            $pct, status_name($sev),
+        );
+    }
+}
+
+my @storage_lines;
+my @storage_assessed;
+for my $s (@{$parsed->{storage}}) {
+    my $pct;
+    my $sev;
+    if (defined($s->{mb_quota}) && $s->{mb_quota} > 0) {
+        $pct = percent($s->{mb_used}, $s->{mb_quota});
+        $sev = severity_for($pct, $warn, $crit);
+        $s->{percent_used} = $pct;
+        $s->{status} = status_name($sev);
+        push @assessed, $sev;
+        push @storage_assessed, $s;
+        push @storage_lines, sprintf(
+            "%-22s %s / %s MB  %8.2f%%  %s",
+            $s->{name}, fmt_num($s->{mb_used}), fmt_num($s->{mb_quota}),
+            $pct, status_name($sev),
+        );
+    }
+    else {
+        $s->{status} = q{N/A};
+        push @storage_lines, sprintf(
+            "%-22s %s / %s MB  %8s  %s",
+            $s->{name}, fmt_num($s->{mb_used}), fmt_num($s->{mb_quota}), q{n/a}, q{N/A},
+        );
+    }
+    push @storage_lines, "  Expiration: $s->{expiration}" if defined($s->{expiration}) && $s->{expiration} ne q{};
+}
+
+my @cpu_lines;
+my @cpu_assessed;
+for my $c (@{$parsed->{cpu}}) {
+    my $used = defined($c->{allocated}) && defined($c->{remaining})
+        ? $c->{allocated} - $c->{remaining}
+        : undef;
+    $used = 0 if defined($used) && $used < 0 && $used > -0.000001;
+    $c->{used} = $used if defined $used;
+
+    if (defined($c->{allocated}) && $c->{allocated} > 0 && defined($used)) {
+        my $pct = percent($used, $c->{allocated});
+        my $sev = severity_for($pct, $warn, $crit);
+        $c->{percent_used} = $pct;
+        $c->{status} = status_name($sev);
+        push @assessed, $sev;
+        push @cpu_assessed, $c;
+        push @cpu_lines, sprintf(
+            "%-22s %s / %s SU  %8.2f%%  %s",
+            $c->{name}, fmt_num($used), fmt_num($c->{allocated}),
+            $pct, status_name($sev),
+        );
+        push @cpu_lines, "  Remaining: " . fmt_num($c->{remaining});
+    }
+    else {
+        $c->{status} = q{N/A};
+        push @cpu_lines, sprintf(
+            "%-22s allocated=%s remaining=%s  %s",
+            $c->{name}, fmt_num($c->{allocated}), fmt_num($c->{remaining}), q{N/A},
+        );
+    }
+    push @cpu_lines, "  Expiration: $c->{expiration}" if defined($c->{expiration}) && $c->{expiration} ne q{};
+}
+
+my $highest_storage = highest_percent(@storage_assessed);
+my $highest_cpu = highest_percent(@cpu_assessed);
+
+my $overall = @assessed ? max(@assessed) : UNKNOWN;
+my $notify_combined =
+       defined($highest_cpu)
+    && defined($highest_storage)
+    && $highest_cpu->{percent_used} > $crit
+    && $highest_storage->{percent_used} > $crit;
+
+my @notes;
+push @notes, q{No filesystem quota with a nonzero MB quota or file quota was reported.}
+    if not @filesystem_lines;
+push @notes, q{No storage allocation section was reported.}
+    if not @{$parsed->{storage}};
+push @notes, q{Storage allocation data were present but no nonzero MB quota could be assessed.}
+    if @{$parsed->{storage}} && not @storage_assessed;
+push @notes, q{No CPU/SU allocation section was reported.}
+    if not @{$parsed->{cpu}};
+push @notes, q{CPU/SU allocation data were present but no positive allocation could be assessed.}
+    if @{$parsed->{cpu}} && not @cpu_assessed;
+
+my $report = render_report(
+    resource         => $resource,
+    hpcshort         => $hpcshort,
+    hpcenv           => $hpcenv,
+    filesystem_lines => \@filesystem_lines,
+    storage_lines    => \@storage_lines,
+    cpu_lines        => \@cpu_lines,
+    highest_storage  => $highest_storage,
+    highest_cpu      => $highest_cpu,
+    notes            => \@notes,
+);
+
+my $details = {
+    schema      => 1,
+    type        => q{lsu_loni_showquota},
+    notify      => $notify_combined ? JSON::PP::true : JSON::PP::false,
+    resource    => {
+        name        => $resource,
+        hpcenvshort => $hpcshort,
+        hpcenv      => $hpcenv,
+    },
+    thresholds => {
+        warning  => 0 + $warn,
+        critical => 0 + $crit,
+    },
+    filesystem => $parsed->{filesystem},
+    storage    => $parsed->{storage},
+    cpu        => $parsed->{cpu},
+    highest    => {
+        storage => defined($highest_storage) ? {
+            name => $highest_storage->{name},
+            percent_used => 0 + sprintf(q{%.4f}, $highest_storage->{percent_used}),
+            status => $highest_storage->{status},
+        } : undef,
+        cpu => defined($highest_cpu) ? {
+            name => $highest_cpu->{name},
+            percent_used => 0 + sprintf(q{%.4f}, $highest_cpu->{percent_used}),
+            status => $highest_cpu->{status},
+        } : undef,
+    },
+    combined_allocation_alert => $notify_combined ? JSON::PP::true : JSON::PP::false,
+    overall_status => status_name($overall),
+    notes => \@notes,
+};
+write_details($details);
+
+if ($overall == OK) {
+    print $report;
+    exit OK;
+}
+
+my $level = status_name($overall);
+my $subject = "($hpcshort $profile - 014-showquota) $level LSU/LONI allocation and quota usage";
+print "$subject\n\n$report";
+exit $overall;
+
+sub parse_showquota {
+    my ($text) = @_;
+    my $section = q{};
+    my @filesystem;
+    my @storage;
+    my @cpu;
+
+    for my $line (split /\n/, $text) {
+        $line =~ s/\r\z//;
+        next if $line =~ /^\s*$/;
+
+        if ($line =~ /^\s*User\s+filesystem\s+quotas\b/i) {
+            $section = q{filesystem};
+            next;
+        }
+        if ($line =~ /^\s*Storage\s+allocation\b/i) {
+            $section = q{storage};
+            next;
+        }
+        if ($line =~ /^\s*CPU\s+Allocation\s+SUs\b/i) {
+            $section = q{cpu};
+            next;
+        }
+
+        next if $line =~ /^\s*(?:Filesystem|MB\s+used|remaining)\b/i;
+
+        my $trim = $line;
+        $trim =~ s/^\s+|\s+$//g;
+        my @f = split /\s+/, $trim;
+
+        if ($section eq q{filesystem}) {
+            next if @f < 5;
+            my $fquota   = parse_number(pop @f);
+            my $files    = parse_number(pop @f);
+            my $mb_quota = parse_number(pop @f);
+            my $mb_used  = parse_number(pop @f);
+            next if !defined($fquota) || !defined($files)
+                 || !defined($mb_quota) || !defined($mb_used);
+            my $filesystem = join q{ }, @f;
+            next if $filesystem eq q{};
+            push @filesystem, {
+                filesystem => $filesystem,
+                mb_used    => $mb_used,
+                mb_quota   => $mb_quota,
+                files      => $files,
+                fquota     => $fquota,
+            };
+        }
+        elsif ($section eq q{storage}) {
+            next if @f < 5;
+            my $expiration = pop @f;
+            my $files      = parse_number(pop @f);
+            my $mb_quota   = parse_number(pop @f);
+            my $mb_used    = parse_number(pop @f);
+            next if !defined($files) || !defined($mb_quota) || !defined($mb_used);
+            my $name = join q{ }, @f;
+            next if $name eq q{};
+            push @storage, {
+                name       => $name,
+                mb_used    => $mb_used,
+                mb_quota   => $mb_quota,
+                files      => $files,
+                expiration => $expiration,
+            };
+        }
+        elsif ($section eq q{cpu}) {
+            next if @f < 4;
+            my $expiration = pop @f;
+            my $allocated  = parse_number(pop @f);
+            my $remaining  = parse_number(pop @f);
+            next if !defined($allocated) || !defined($remaining);
+            my $name = join q{ }, @f;
+            $name =~ s/:\z//;
+            next if $name eq q{};
+            push @cpu, {
+                name       => $name,
+                remaining  => $remaining,
+                allocated  => $allocated,
+                expiration => $expiration,
+            };
+        }
+    }
+
+    return {
+        filesystem => \@filesystem,
+        storage    => \@storage,
+        cpu        => \@cpu,
+    };
+}
+
+sub run_command {
+    my ($cmd) = @_;
+    my $err = gensym;
+    my ($in, $out);
+    my $pid = eval { open3($in, $out, $err, $cmd) };
+    if (not defined $pid) {
+        return (q{}, "unable to execute $cmd: $@", 127);
+    }
+    close $in if defined $in;
+    local $/;
+    my $stdout = <$out> // q{};
+    my $stderr = <$err> // q{};
+    close $out;
+    close $err;
+    waitpid($pid, 0);
+    my $rc = $? == -1 ? 127 : ($? >> 8);
+    return ($stdout, $stderr, $rc);
+}
+
+sub command_in_path {
+    my ($cmd) = @_;
+    return $cmd if $cmd =~ m{/} && -x $cmd;
+    for my $dir (split /:/, ($ENV{PATH} // q{})) {
+        $dir = q{.} if $dir eq q{};
+        my $path = "$dir/$cmd";
+        return $path if -f $path && -x $path;
+    }
+    return undef;
+}
+
+sub parse_number {
+    my ($x) = @_;
+    return undef if not defined $x;
+    $x =~ s/,//g;
+    return undef if $x !~ /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+    return 0 + $x;
+}
+
+sub numeric_env {
+    my ($name, $default) = @_;
+    return $default if !defined($ENV{$name}) || $ENV{$name} eq q{};
+    my $n = parse_number($ENV{$name});
+    return defined($n) ? $n : -1;
+}
+
+sub percent {
+    my ($used, $quota) = @_;
+    return 100.0 * $used / $quota;
+}
+
+sub severity_for {
+    my ($pct, $warning, $critical) = @_;
+    return CRITICAL if $pct > $critical;
+    return WARNING  if $pct > $warning;
+    return OK;
+}
+
+sub status_name {
+    my ($code) = @_;
+    return q{OK}       if $code == OK;
+    return q{WARNING}  if $code == WARNING;
+    return q{CRITICAL} if $code == CRITICAL;
+    return q{UNKNOWN};
+}
+
+sub highest_percent {
+    my (@items) = @_;
+    my $highest;
+    for my $item (@items) {
+        next if not defined $item->{percent_used};
+        $highest = $item if !defined($highest)
+            || $item->{percent_used} > $highest->{percent_used};
+    }
+    return $highest;
+}
+
+sub max {
+    my (@v) = @_;
+    my $m = shift @v;
+    for my $x (@v) {
+        $m = $x if $x > $m;
+    }
+    return $m;
+}
+
+sub fmt_num {
+    my ($n) = @_;
+    return q{n/a} if not defined $n;
+    return sprintf(q{%.2f}, $n) if $n != int($n);
+    return sprintf(q{%d}, $n);
+}
+
+sub resource_name {
+    my ($short, $env) = @_;
+    my %known = (
+        q{qbd}       => q{QueenBeeD},
+        q{queenbeeC} => q{QueenBeeC},
+        q{supermic}  => q{SuperMIC},
+        q{mike}      => q{SuperMike},
+    );
+    return $known{$short} if exists $known{$short};
+    return $short if defined($short) && $short ne q{} && $short ne q{unknown};
+    return $env if defined($env) && $env ne q{};
+    return q{unknown};
+}
+
+sub render_report {
+    my (%a) = @_;
+    my @out;
+    push @out, q{LSU/LONI Allocation and Quota Check};
+    push @out, q{===================================};
+    push @out, q{};
+    push @out, "Resource: $a{resource}";
+    push @out, "HPCENVSHORT: $a{hpcshort}";
+    push @out, "HPCENV: $a{hpcenv}";
+    push @out, q{};
+    push @out, q{Filesystem quotas};
+    push @out, @{$a{filesystem_lines}} ? @{$a{filesystem_lines}} : q{(none with a meaningful quota)};
+    push @out, q{};
+    push @out, q{Storage allocations};
+    push @out, @{$a{storage_lines}} ? @{$a{storage_lines}} : q{(none reported)};
+    if (defined $a{highest_storage}) {
+        push @out, sprintf(
+            "Highest storage allocation: %s %.2f%% %s",
+            $a{highest_storage}->{name}, $a{highest_storage}->{percent_used},
+            $a{highest_storage}->{status},
+        );
+    }
+    push @out, q{};
+    push @out, q{CPU/SU allocations};
+    push @out, @{$a{cpu_lines}} ? @{$a{cpu_lines}} : q{(none reported)};
+    if (defined $a{highest_cpu}) {
+        push @out, sprintf(
+            "Highest CPU/SU allocation: %s %.2f%% %s",
+            $a{highest_cpu}->{name}, $a{highest_cpu}->{percent_used},
+            $a{highest_cpu}->{status},
+        );
+    }
+    push @out, q{};
+    push @out, q{Overall:};
+    if (defined $a{highest_cpu}) {
+        push @out, sprintf(
+            "CPU allocation:     %.2f%% %s (%s)",
+            $a{highest_cpu}->{percent_used}, $a{highest_cpu}->{status},
+            $a{highest_cpu}->{name},
+        );
+    }
+    else {
+        push @out, q{CPU allocation:     n/a};
+    }
+    if (defined $a{highest_storage}) {
+        push @out, sprintf(
+            "Storage allocation: %.2f%% %s (%s)",
+            $a{highest_storage}->{percent_used}, $a{highest_storage}->{status},
+            $a{highest_storage}->{name},
+        );
+    }
+    else {
+        push @out, q{Storage allocation: n/a};
+    }
+    if (@{$a{notes}}) {
+        push @out, q{};
+        push @out, q{Notes:};
+        push @out, map { "- $_" } @{$a{notes}};
+    }
+    return join("\n", @out) . "\n";
+}
+
+sub write_details {
+    my ($details) = @_;
+    my $path = $ENV{ASGS_MON_RESULT_FILE};
+    return if !defined($path) || $path eq q{};
+    if (open my $fh, q{>}, $path) {
+        print {$fh} encode_json($details), "\n";
+        close $fh;
+    }
+}
+
+sub emit_unknown {
+    my ($subject_text, $body, $details) = @_;
+    $details->{schema} //= 1;
+    $details->{type} //= q{lsu_loni_showquota};
+    $details->{overall_status} //= q{UNKNOWN};
+    write_details($details);
+    print "($hpcshort $profile - 014-showquota) UNKNOWN $subject_text\n\n$body";
+    exit UNKNOWN;
+}

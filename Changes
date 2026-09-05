@@ -1,5 +1,26 @@
 # Changes
 
+## 0.2.4 - 2026-09-04
+
+* Added disabled-by-default `014-showquota` for LSU/LONI systems that provide
+  `showquota`; it uses the loaded ASGS `HPCENVSHORT`/`HPCENV`, reports
+  filesystem, storage-allocation, and CPU/SU percentages, and supports multiple
+  storage and CPU allocations while identifying the highest-utilization entry.
+* `014-showquota` applies strict `>75%` WARNING and `>95%` CRITICAL thresholds.
+  CPU usage is derived as `allocated - remaining`; zero MB filesystem quotas are
+  never interpreted as percentage quotas.
+* Added an opt-in per-check notification-policy field in structured result JSON:
+  `details.notify=false` suppresses email without changing the check severity.
+  Existing checks remain notification-enabled by default when the field is
+  absent. A false-to-true policy transition is alert-worthy even when severity
+  is unchanged.
+* The LSU/LONI quota check uses that policy so WARNING and one-sided CRITICAL
+  quota conditions remain visible but email is requested only when both the
+  highest CPU/SU allocation and highest storage allocation are above 95%.
+* Added regression coverage for whitespace-tolerant parsing, QueenBee/LSU
+  resource naming, multiple allocations, missing sections, command failure,
+  threshold boundaries, and notification-policy behavior.
+
 ## 0.2.3 - 2026-09-03
 
 * Refined `atcf-sanity` operator output after the first live AL052026 replay

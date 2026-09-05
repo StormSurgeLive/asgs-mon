@@ -32,7 +32,7 @@ use Term::ANSIColor  qw/:constants colorstrip/;
 use Time::HiRes      qw/gettimeofday tv_interval usleep/;
 use Util::H2O::More  qw/Getopt2h2o h2o ini2h2o/;
 
-our $VERSION = q{0.2.3};
+our $VERSION = q{0.2.4};
 
 use constant {
     DEFAULT_DELAY          => 10,
@@ -1027,20 +1027,43 @@ sub present_result {
     my $now     = time;
     my $sent    = 0;
     my $suppressed = 0;
+    my $policy_suppressed = 0;
+
+    # Checks may optionally set details.notify to a JSON boolean. When false,
+    # the status/severity is still recorded and presented normally, but email
+    # is suppressed. Existing checks are unchanged because notification is
+    # allowed by default when the field is absent.
+    my $notification_allowed = 1;
+    if (defined($result->{details}) && ref($result->{details}) eq q{HASH}
+        && exists($result->{details}->{notify})) {
+        $notification_allowed = $result->{details}->{notify} ? 1 : 0;
+    }
+
+    my $old_notification_allowed;
+    if ($CACHE{$plugin}->{last} && defined($CACHE{$plugin}->{last}->{notification_allowed})) {
+        $old_notification_allowed = $CACHE{$plugin}->{last}->{notification_allowed} ? 1 : 0;
+    }
 
     if ($retcode != OK) {
         my $last_alert = $CACHE{$plugin}->{alerted_at};
         my $severity_escalated = defined($oldret) && severity_rank($retcode) > severity_rank($oldret);
         my $transition = (!defined($oldret) || $oldret == OK);
         my $status_transition = defined($oldret) && $oldret != $retcode;
+        my $notification_policy_transition = $notification_allowed
+            && defined($old_notification_allowed) && !$old_notification_allowed;
 
         my $due = !defined($last_alert)
                || $transition
                || $status_transition
                || $severity_escalated
+               || $notification_policy_transition
                || $now >= ($last_alert + $notify->hush);
 
-        if ($notify->enabled && $due) {
+        if ($notify->enabled && !$notification_allowed) {
+            $suppressed = 1;
+            $policy_suppressed = 1;
+        }
+        elsif ($notify->enabled && $due) {
             $sent = notify($plugin, $output, $notify) ? 1 : 0;
             $CACHE{$plugin}->{alerted_at} = $now if $sent;
         }
@@ -1049,6 +1072,7 @@ sub present_result {
         }
 
         my $tag = $sent ? q{(alert sent)}
+                : $policy_suppressed ? q{(notification suppressed by check policy)}
                 : $suppressed ? q{(alert suppressed)}
                 : q{(notification disabled)};
         print_alert_line($retcode, $result->{subject}, $tag);
@@ -1067,8 +1091,9 @@ sub present_result {
     $CACHE{$plugin}->{retcode} = $retcode;
     $CACHE{$plugin}->{last}    = {
         %$result,
-        notified  => $sent ? JSON::PP::true : JSON::PP::false,
-        suppressed=> $suppressed ? JSON::PP::true : JSON::PP::false,
+        notified            => $sent ? JSON::PP::true : JSON::PP::false,
+        suppressed          => $suppressed ? JSON::PP::true : JSON::PP::false,
+        notification_allowed=> $notification_allowed ? JSON::PP::true : JSON::PP::false,
     };
 
     my $event = build_event($plugin, $result, $ctx, $sent, $suppressed);

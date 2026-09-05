@@ -22,7 +22,7 @@ for my $file (sort @bash) {
     is($rc, 0, "bash syntax: $file");
 }
 
-for my $file (qw/available\/001-instance-status-check available\/002-hook-status-check available\/atcf-sanity lib\/ASGS\/Mon\/ATCF.pm examples\/check-template.pl/) {
+for my $file (qw/available\/001-instance-status-check available\/002-hook-status-check available\/014-showquota available\/atcf-sanity lib\/ASGS\/Mon\/ATCF.pm examples\/check-template.pl/) {
     my $rc = system($^X, q{-c}, $file);
     is($rc, 0, "perl syntax: $file");
 }
