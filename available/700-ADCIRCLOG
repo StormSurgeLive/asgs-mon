@@ -6,43 +6,56 @@
 # Copyright(C) 2024-present Jason Fleming
 #
 # This file is part of the ADCIRC Surge Guidance System (ASGS).
+#
+# Report compact progress snippets from ADCIRC logs for the current advisory.
+# This check deliberately ignores SWAN PE logs; SWAN monitoring should be a
+# separate check if desired.
 #--------------------------------------------------------------------------
 
 source "${ASGS_MON_LIB:-${ASGS_MON_PLUGINDIR}/_bash-helper-functions.sh}"
 mon_init "$@"
 
-
 mon_require_var RUNDIR
 mon_require_dir "$RUNDIR" RUNDIR
 
 advisory=${ADVISORY:-initialize}
-[[ -z "$advisory" || "$advisory" == 0 ]] && advisory=initialize
+
+if [[ -z "$advisory" || "$advisory" == "0" || "$advisory" == "null" ]]; then
+    advisory=initialize
+fi
+
 search_root="$RUNDIR/$advisory"
 
+# During transitions, the advisory directory may not exist yet.
 if [[ ! -d "$search_root" ]]; then
-    mon_verbose "($HPCENVSHORT $COLORED_PROFILE - ${YW}$THIS${R}) advisory directory not present yet: $search_root"
-    mon_ok "0"
+    if [[ "$VERBOSE" == 1 ]]; then
+        printf '(%s %s - %s%s%s) ADCIRC advisory directory not present yet: %s\n' \
+            "$HPCENVSHORT" "$COLORED_PROFILE" \
+            "$GR" "$THIS" "$R" \
+            "$search_root" >&2
+    fi
+
+    mon_ok "0 ADCIRC logs"
 fi
 
 shown=0
+
 while IFS= read -r -d '' log; do
-    ((shown++))
+    shown=$((shown + 1))
+
     if [[ "$VERBOSE" == 1 ]]; then
-        printf '%s\n' "$log" >&2
         printf '(%s %s - %s%s%s) - %sADCIRC LOG%s:\n' \
-            "$HPCENVSHORT" "$COLORED_PROFILE" "$GR" "$THIS" "$R" "$YW" "$R" >&2
+            "$HPCENVSHORT" "$COLORED_PROFILE" \
+            "$GR" "$THIS" "$R" \
+            "$YW" "$R" >&2
+
         tail -n 3 -- "$log" >&2
     fi
-done < <(find "$search_root" -type f -name adcirc.log -print0 2>/dev/null)
+done < <(
+    find "$search_root" \
+        -type f \
+        -name 'adcirc.log' \
+        -print0 2>/dev/null
+)
 
-while IFS= read -r -d '' log; do
-    ((shown++))
-    if [[ "$VERBOSE" == 1 ]]; then
-        printf '%s\n' "$log" >&2
-        printf '(%s %s - %s%s%s) - %sSWAN LOG%s:\n' \
-            "$HPCENVSHORT" "$COLORED_PROFILE" "$GR" "$THIS" "$R" "$YW" "$R" >&2
-        tail -n 10 -- "$log" | grep 'Time of' >&2 || true
-    fi
-done < <(find "$search_root" -type f -name asgs_swan.prt -print0 2>/dev/null)
-
-mon_ok "$shown"
+mon_ok "$shown ADCIRC log(s)"
